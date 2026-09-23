@@ -350,22 +350,43 @@ class SessionDaemon:
             return {"ok": False, "error": "prompt must be a non-empty string"}
         current = self._session(key)
         restarted = bool(current.pop("restarted", False))
+        started_at = int(time.time())
+        current["status"] = "running"
+        current["active_turn"] = int(current.get("turns", 0)) + 1
+        current["prompt_started_at"] = started_at
+        current["updated_at"] = started_at
+        self._save_state()
         rotate = bool(request.get("rotate")) or int(current.get("context_tokens", 0)) >= HARD_CONTEXT_TOKENS
         handoff = ""
-        if rotate and int(current.get("turns", 0)) > 0:
-            current, handoff = self._rotate(key, current, timeout)
-        full_prompt = f"{mode_instruction(self.mode)}\n\n{prompt}"
-        if handoff:
-            full_prompt = (
-                f"{mode_instruction(self.mode)}\n\n"
-                "You are continuing a rotated DSH scout session. Treat this handoff as working context; verify mutable facts in the repository.\n\n"
-                f"--- HANDOFF ---\n{handoff}\n--- END HANDOFF ---\n\n{prompt}"
-            )
-        answer = self.sdk.prompt(current["session_id"], full_prompt, timeout)
+        try:
+            if rotate and int(current.get("turns", 0)) > 0:
+                current, handoff = self._rotate(key, current, timeout)
+                current["status"] = "running"
+                current["active_turn"] = 1
+                current["prompt_started_at"] = started_at
+                current["updated_at"] = int(time.time())
+                self._save_state()
+            full_prompt = f"{mode_instruction(self.mode)}\n\n{prompt}"
+            if handoff:
+                full_prompt = (
+                    f"{mode_instruction(self.mode)}\n\n"
+                    "You are continuing a rotated DSH scout session. Treat this handoff as working context; verify mutable facts in the repository.\n\n"
+                    f"--- HANDOFF ---\n{handoff}\n--- END HANDOFF ---\n\n{prompt}"
+                )
+            answer = self.sdk.prompt(current["session_id"], full_prompt, timeout)
+        except Exception:
+            current["status"] = "error"
+            current["last_error_at"] = int(time.time())
+            current.pop("active_turn", None)
+            self._save_state()
+            raise
         expected_turn = int(current.get("turns", 0)) + 1
         stats = wait_session_stats(current["session_id"], expected_turn)
         current.update(stats)
         current["turns"] = expected_turn
+        current["status"] = "idle"
+        current["last_completed_at"] = int(time.time())
+        current.pop("active_turn", None)
         current["updated_at"] = int(time.time())
         self._save_state()
         context_tokens = int(current.get("context_tokens", 0))

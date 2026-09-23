@@ -84,6 +84,8 @@ Within a live session, the request history remains append-only, which preserves 
 
 If the controller exits or the machine restarts, the next call starts a fresh live session and reports the loss of retained history. The next delegation packet must re-establish authoritative state.
 
+The controller state file records the session ID, `status: running`, active turn, and start time before it dispatches a prompt. This makes a long first turn distinguishable from a stalled or missing controller even before the model returns its final response.
+
 ## Security boundary
 
 The writer starts DSH with `danger-full-access` and `approval=never`; it inherits the authority in the user's task and repository instructions.
