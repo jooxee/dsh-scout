@@ -1,0 +1,72 @@
+---
+name: dsh-scout
+description: Delegate bounded repository work to the local DeepSeek Harness headless agent, either as one full-access writer or as an optional read-only scout beside that writer. Use when the user requests DSH, DeepSeek Harness, GLM, or an external scout, or when a substantial repository task would materially benefit from an independent DSH pass.
+---
+
+# DSH Scout
+
+Use the persistent SDK launcher so the user never has to copy prompts between Codex and DeepSeek Harness. The default route is OpenCode Go with GLM Flash; verify it when model identity matters. `DSH_SCOUT_PROVIDER` and `DSH_SCOUT_MODEL` override those defaults.
+
+## Choose the topology
+
+Run sequentially by default.
+
+- **Writer:** one persistent DSH agent with full access to the selected project. Reuse it for the same Issue/OpenSpec/PR so its live history and provider KV cache remain useful.
+- **Reader:** optionally run one additional DSH agent in OS-enforced read-only mode for the project roots. Prefer a fresh session key for an independent question; reuse one only when the questions form a coherent investigation.
+
+At most one writer and one reader may run at once. Never run two writers, two readers, or more than two DSH agents. The launcher locks enforce these limits.
+
+The SDK process runs with DSH's full-access preset so the writer can use its tools without interactive approval. For the reader, an outer bubblewrap boundary mounts all project roots read-only; the inner full-access preset only avoids an unsupported nested sandbox and cannot bypass those mounts.
+
+Full access does not expand the task: the writer inherits the selected worktree, repository instructions, OpenSpec and GitHub Issue workflow, external-action authority, and preservation requirements. It may commit, push, merge, deploy, or contact external systems only when the current task already authorizes that action.
+
+## Prepare the delegation packet
+
+DSH does not inherit this conversation. The first prompt for a session key must be a self-contained packet containing:
+
+- the exact objective and completion condition;
+- the absolute working directory, branch/base, and known state;
+- the relevant `AGENTS.md`, `CONTEXT.md`, `ARCHITECTURE.md`, OpenSpec, Issue, or PR paths to read;
+- its mode (`WRITE` or `READ_ONLY`) and permitted side effects;
+- unrelated changes and surfaces it must preserve;
+- the expected response: findings, changed files, checks, commit/push state, and remaining uncertainty.
+
+Keep credentials, cookies, learner data, and other secrets out of the prompt. Point to configured local mechanisms instead of copying secret values.
+
+Follow-up prompts under the same session key may be short and refer to the retained discussion. Still repeat changed authority, branch, commit, Issue, OpenSpec, or observed state. Cache reuse never makes mutable facts current.
+
+## Reuse and rotate sessions
+
+Choose a stable, human-readable session key for one coherent unit of work, normally `<repo>:issue-<n>:writer` or `<repo>:openspec-<change>:writer`. Keep using that key while the objective and authoritative artifacts remain the same. Start a new key when the Issue/OpenSpec/PR, repository, role, or objective changes materially.
+
+The launcher records exact DSH context pressure from the session store:
+
+- at **250,000 tokens** by default, treat the session as mature and rotate at the next coherent task boundary;
+- at **400,000 tokens** by default, the launcher automatically asks the current scout for a compact handoff, saves it, starts a fresh live session, and supplies the handoff with the next prompt;
+- use `--rotate` to force the same handoff flow earlier.
+
+Override the thresholds with `DSH_SCOUT_SOFT_CONTEXT_TOKENS` and `DSH_SCOUT_HARD_CONTEXT_TOKENS`. The soft value must remain below the hard value.
+
+Do not infer context size from cumulative billed usage. Cache reads reduce repeated computation but do not free context-window space. If the controller had to restart, the launcher reports that the live history was lost; send a new self-contained packet and re-check repository state.
+
+## Launch
+
+Save the packet in a temporary prompt file outside the repository, then run:
+
+```bash
+"${CODEX_HOME:-$HOME/.codex}/skills/dsh-scout/scripts/run-dsh-agent.sh" \
+  --mode write \
+  --cwd /absolute/project/path \
+  --session-key repo:issue-123:writer \
+  --prompt-file /absolute/path/to/prompt.txt
+```
+
+For the optional second scout, use `--mode read` and a key ending in `:reader`. The reader can run beside the writer; otherwise wait for one request to finish before starting another. Use `--timeout-seconds N` only when the default one-hour bound is unsuitable. Use `--rotate` only at a coherent boundary because it creates a handoff turn.
+
+If the command yields a running session, supervise it with the execution-session wait mechanism and keep the user updated. Do not ask the user to relay the prompt or result.
+
+## Verify the result
+
+Treat every DSH response as a handoff, not proof. After a writer turn, inspect the actual branch, status, diff, artifacts, tests, commits, remote state, Issue, and OpenSpec relevant to its claims. After a reader turn, check cited evidence before acting on its conclusions.
+
+Resolve inconsistencies in the authoritative repository state. Report which work DSH performed, what Codex independently verified, and what remains unverified.

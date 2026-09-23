@@ -1,0 +1,4 @@
+interface:
+  display_name: "DSH Scout"
+  short_description: "Delegate bounded work to the local DSH agent"
+  default_prompt: "Use $dsh-scout to delegate this repository task to the local DeepSeek Harness."
