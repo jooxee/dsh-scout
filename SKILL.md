@@ -69,4 +69,19 @@ If the command yields a running session, supervise it with the execution-session
 
 Treat every DSH response as a handoff, not proof. After a writer turn, inspect the actual branch, status, diff, artifacts, tests, commits, remote state, Issue, and OpenSpec relevant to its claims. After a reader turn, check cited evidence before acting on its conclusions.
 
+### The verification handoff protocol
+
+DSH completion is never proof that a repository task is correct. Per completed turn the controller records, inside the existing state file, two machine-readable `repository_facts` snapshots (one captured at prompt dispatch, one after completion) plus a `verification: {"state": "pending"}` marker. The snapshots are derived only by the controller from the selected working directory — repository root, HEAD, branch, bounded porcelain status, and upstream divergence where safely available; a bounded error is stored when cwd is not a Git worktree or Git fails. No file contents, prompts, model output, or secrets are captured and no model-provided command is executed.
+
+When a turn completes, the wrapper prints to stderr that the DSH handoff completed but **independent orchestrator verification is pending**, with the session key and state-file location.
+
+Before reporting any DSH work to a repository owner, the orchestrator must independently verify:
+
+- the actual diff (compare the post-turn working tree and HEAD against the pre-turn snapshot);
+- commits exist and were pushed where required;
+- declared checks, tests, lint, or builds actually pass;
+- GitHub Issue / OpenSpec / PR records reflect what was done.
+
+Limitations of the protocol: snapshots are point-in-time and racy — concurrent edits between dispatch and completion, DSH activity across multiple sessions, or manual changes are not attributed to the turn. The controller never executes builds, tests, auto-merge, or deploy and never judges repository correctness; `verification: pending` means exactly that a human/orchestrator still owns the independent verification step.
+
 Resolve inconsistencies in the authoritative repository state. Report which work DSH performed, what Codex independently verified, and what remains unverified.
