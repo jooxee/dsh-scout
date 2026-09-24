@@ -27,8 +27,7 @@ GIT_SCRIPT: dict[tuple[str, ...], subprocess.CompletedProcess[str]] = {
     ("branch", "--show-current"): _result("main"),
     ("status", "--porcelain=v1"): _result(" M a.py\n M b.py\n"),
     ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"): _result("origin/main"),
-    ("rev-list", "--left-right", "--count", "origin/main...HEAD"): _result("1\t2\n"),
-}
+    ("rev-list", "--left-right", "--count", "origin/main...HEAD"): _result("1\t2\n"),}
 
 
 def make_fake_run(script: dict):
@@ -52,10 +51,16 @@ class RepositoryFactsTests(unittest.TestCase):
         self.assertEqual(facts["porcelain_status"], [" M a.py", " M b.py"])
         self.assertFalse(facts["status_truncated"])
         self.assertFalse(facts["clean"])
+        # `git rev-list --left-right --count upstream...HEAD` prints
+        # "<commits only in upstream>\t<commits only in HEAD>", i.e.
+        # behind \t ahead. The scripted output 1\t2 means the local branch
+        # is 1 commit behind origin/main and 2 commits ahead of it.
         self.assertEqual(
             facts["upstream"],
-            {"name": "origin/main", "ahead": 1, "behind": 2},
+            {"name": "origin/main", "behind": 1, "ahead": 2},
         )
+        self.assertEqual(facts["upstream"]["behind"], 1)
+        self.assertEqual(facts["upstream"]["ahead"], 2)
 
     def test_status_is_bounded_and_clipped(self):
         script = dict(GIT_SCRIPT)

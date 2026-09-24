@@ -322,8 +322,8 @@ def repository_facts(cwd: Path, status_limit: int = GIT_FACTS_STATUS_LIMIT) -> d
             if divergence.returncode == 0 and len(parts) == 2:
                 facts["upstream"] = {
                     "name": name,
-                    "ahead": int(parts[0]),
-                    "behind": int(parts[1]),
+                    "ahead": int(parts[1]),
+                    "behind": int(parts[0]),
                 }
         return facts
     except (subprocess.TimeoutExpired, OSError, ValueError) as error:
