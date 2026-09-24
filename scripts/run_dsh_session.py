@@ -259,7 +259,87 @@ def handoff_prompt() -> str:
     return """Prepare a compact handoff for your successor session. Include only durable information needed to continue this exact task: objective, authoritative Issue/OpenSpec/PR, decisions, files and code state, commands/checks and results, unresolved questions, and the next concrete action. Do not perform new work. Do not include secrets. Return the handoff as Markdown."""
 
 
+GIT_FACTS_STATUS_LIMIT = 200
+GIT_FACTS_STATUS_LINE_LIMIT = 240
+GIT_FACTS_ERROR_LIMIT = 200
+
+
+def _git(args: list[str], cwd: Path, timeout: int = 10) -> subprocess.CompletedProcess[str]:
+    """Run one controller-chosen git command; never anything model-provided."""
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+    )
+
+
+def _clipped(value: str, limit: int = GIT_FACTS_ERROR_LIMIT) -> str:
+    return value.strip()[:limit]
+
+
+def repository_facts(cwd: Path, status_limit: int = GIT_FACTS_STATUS_LIMIT) -> dict[str, Any]:
+    """Best-effort, controller-derived Git facts for ``cwd``.
+
+    Returns machine-readable facts only: repository root, HEAD commit, branch,
+    porcelain working-tree status (length-clipped), and upstream divergence when
+    safely available.  Any failure or non-Git directory yields a bounded error
+    record instead of raising, so snapshotting can never fail a prompt dispatch.
+    File contents, prompts, secrets, and model output are never captured.
+    """
+    try:
+        probe = _git(["rev-parse", "--show-toplevel"], cwd)
+        if probe.returncode != 0:
+            # Not a Git worktree (or Git is unavailable); record and move on.
+            return {
+                "available": False,
+                "status": "not-a-git-worktree",
+                "error": _clipped(probe.stderr),
+            }
+        facts: dict[str, Any] = {"available": True}
+        facts["repository_root"] = probe.stdout.strip()
+        head = _git(["rev-parse", "HEAD"], cwd)
+        if head.returncode == 0:
+            facts["head"] = head.stdout.strip()
+        branch = _git(["branch", "--show-current"], cwd)
+        if branch.returncode == 0:
+            facts["branch"] = branch.stdout.strip()
+        status = _git(["status", "--porcelain=v1"], cwd)
+        if status.returncode == 0:
+            porcelain = status.stdout.splitlines()
+            facts["pending_changes"] = len(porcelain)
+            facts["porcelain_status"] = [
+                line[:GIT_FACTS_STATUS_LINE_LIMIT] for line in porcelain[:status_limit]
+            ]
+            facts["status_truncated"] = len(porcelain) > status_limit
+            facts["clean"] = not porcelain
+        upstream = _git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], cwd)
+        if upstream.returncode == 0:
+            name = upstream.stdout.strip()
+            divergence = _git(["rev-list", "--left-right", "--count", f"{name}...HEAD"], cwd)
+            parts = divergence.stdout.split()
+            if divergence.returncode == 0 and len(parts) == 2:
+                facts["upstream"] = {
+                    "name": name,
+                    "ahead": int(parts[0]),
+                    "behind": int(parts[1]),
+                }
+        return facts
+    except (subprocess.TimeoutExpired, OSError, ValueError) as error:
+        return {
+            "available": False,
+            "status": "git-error",
+            "error": _clipped(str(error)),
+        }
+
+
 class SessionDaemon:
+    @staticmethod
+    def _noop_verification_note() -> str:
+        """Document that completion never implies verified correctness."""
+        return "pending"
+
     def __init__(self, mode: str, cwd: Path, socket_path: Path, state_path: Path) -> None:
         self.mode = mode
         self.cwd = cwd
@@ -355,6 +435,8 @@ class SessionDaemon:
         current["active_turn"] = int(current.get("turns", 0)) + 1
         current["prompt_started_at"] = started_at
         current["updated_at"] = started_at
+        # Record controller-derived repository facts BEFORE the prompt runs.
+        current["handoff_pre_facts"] = repository_facts(self.cwd)
         self._save_state()
         rotate = bool(request.get("rotate")) or int(current.get("context_tokens", 0)) >= HARD_CONTEXT_TOKENS
         handoff = ""
@@ -388,6 +470,16 @@ class SessionDaemon:
         current["last_completed_at"] = int(time.time())
         current.pop("active_turn", None)
         current["updated_at"] = int(time.time())
+        # The turn may have mutated the repository: re-measure AFTER it finishes.
+        current["handoff_post_facts"] = repository_facts(self.cwd)
+        current["verification_facts"] = {
+            "pre_prompt": current.get("handoff_pre_facts") or {},
+            "post_prompt": current.get("handoff_post_facts") or {},
+        }
+        current["verification"] = {
+            "state": "pending",
+            "reason": "DSH handoff completed; the orchestrator must independently verify the actual repository state.",
+        }
         self._save_state()
         context_tokens = int(current.get("context_tokens", 0))
         return {
@@ -402,6 +494,9 @@ class SessionDaemon:
             "rotated": bool(handoff),
             "restarted": restarted,
             "handoff_path": current.get("handoff_path"),
+            "state_file": str(self.state_path),
+            "verification_state": "pending",
+            "verification_facts": current.get("verification_facts"),
             "usage_totals": current.get("usage_totals", {}),
         }
 
@@ -611,6 +706,12 @@ def client_main(args: argparse.Namespace) -> int:
         f"context={context}/{window} ({percent}%) rotated={str(bool(response.get('rotated'))).lower()}",
         file=sys.stderr,
     )
+    if response.get("verification_state") == "pending":
+        print(
+            f"DSH handoff completed but independent orchestrator verification is PENDING "
+            f"for session={response.get('session_key')}; state file: {response.get('state_file')}",
+            file=sys.stderr,
+        )
     if response.get("restarted"):
         print(
             "DSH controller was restarted; this turn used a fresh live session. The delegation packet must re-establish authoritative context.",

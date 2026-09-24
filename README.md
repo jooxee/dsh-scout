@@ -13,7 +13,9 @@ It keeps one writer session alive across related turns so the model can reuse co
 - a 250,000-token soft rotation warning;
 - automatic handoff and rotation at 400,000 tokens;
 - enforced one-writer/one-reader concurrency locks;
-- explicit reporting when a controller restart loses live session history.
+- explicit reporting when a controller restart loses live session history;
+- controller-derived Git facts (pre/post prompt) plus a pending-verification
+  marker per completed turn, so DSH completion is never treated as proof.
 
 ## Requirements
 
@@ -85,6 +87,21 @@ Within a live session, the request history remains append-only, which preserves 
 If the controller exits or the machine restarts, the next call starts a fresh live session and reports the loss of retained history. The next delegation packet must re-establish authoritative state.
 
 The controller state file records the session ID, `status: running`, active turn, and start time before it dispatches a prompt. This makes a long first turn distinguishable from a stalled or missing controller even before the model returns its final response.
+
+## Verification handoff
+
+Completion of a DSH turn is not proof that a repository task is correct. Per completed turn the controller writes machine-readable, controller-derived facts into the state file under the session:
+
+- `handoff_pre_facts` — Git snapshot captured at dispatch;
+- `handoff_post_facts` — Git snapshot captured after the turn finished;
+- `verification_facts` — `{pre_prompt, post_prompt}` combined view;
+- `verification` — `{"state": "pending", ...}`.
+
+The snapshots contain only facts the controller itself derives from the selected working directory: resolved repository root, HEAD commit, current branch, bounded `git status --porcelain=v1` lines (at most 200 lines, 240 characters each), and upstream ahead/behind divergence when it can be resolved safely. If the directory is not a Git worktree, Git fails, or the snapshot times out, a bounded error record is stored instead and dispatch proceeds. Snapshots never capture file contents, prompts, model responses, secrets, or anything a DSH model asked for, and they never execute model-provided commands.
+
+The client wrapper then prints to stderr that the DSH handoff completed but independent orchestrator verification is still pending, along with the session key and state-file location.
+
+**Orchestrator contract:** before reporting the task as done to a repository owner, an orchestrator must independently inspect the actual state: the real diff between the pre- and post-visit commit/status, whether commits exist and were pushed, whether the declared checks and tests actually pass, and Issue/OpenSpec/PR updates that should carry the work. The recorded facts are a snapshot aid, not an audit trail: they are captured before and after each turn, so concurrent edits between those points, in-flight DSH judges, or uncommitted transient files are still possible; treat the facts as a consistency signal, then verify against the live repository.
 
 ## Security boundary
 
