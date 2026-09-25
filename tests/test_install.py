@@ -137,12 +137,13 @@ class InstallTests(unittest.TestCase):
         self.install("--host", "pi")
         prompt = self.root / "prompt.txt"
         prompt.write_text("Must never be dispatched")
-        runtime = Path(self.env["XDG_RUNTIME_DIR"]) / f"codex-dsh-agent-{os.getuid()}"
+        runtime = self.home / ".codex/state/dsh-scout"
         runtime.mkdir(parents=True)
         for mode in ("write", "read"):
-            with (runtime / f"{mode}.lock").open("w") as lock:
+            with (runtime / f"{mode}.request.lock").open("w") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 for host in ("cursor", "pi"):
+                    self.env["XDG_RUNTIME_DIR"] = str(self.root / host / "runtime")
                     launcher = self.home / PRESETS[host] / "scripts/run-dsh-agent.sh"
                     result = self.run_command(
                         launcher, "--mode", mode, "--cwd", self.root,
@@ -153,7 +154,8 @@ class InstallTests(unittest.TestCase):
                     self.assertEqual(result.stdout, "")
         self.assertFalse((runtime / "write.sock").exists())
         self.assertFalse((runtime / "read.sock").exists())
-        self.assertFalse((self.home / ".codex/state").exists())
+        self.assertFalse((runtime / "write.json").exists())
+        self.assertFalse((runtime / "read.json").exists())
 
 
 if __name__ == "__main__":

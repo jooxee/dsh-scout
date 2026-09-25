@@ -85,7 +85,7 @@ export DSH_SCOUT_MODEL=approved-model
   --prompt-file /absolute/path/to/prompt.txt
 ```
 
-Replace the example provider/model with the approved route. Reuse that same environment for follow-up and UI commands. Hosts must preserve the same `HOME`, `CODEX_HOME` and `XDG_RUNTIME_DIR` to share state and writer/reader locks; installation location does not change them. The historical `.codex` state directory is a compatibility location, not a dependency on Codex.
+Replace the example provider/model with the approved route. Reuse that same environment for follow-up and UI commands. Hosts must preserve the same `HOME` and `CODEX_HOME` to share canonical state identity. Default sockets are independent of `XDG_RUNTIME_DIR`; request and owner locks live beside state, even when custom sockets are used. The historical `.codex` state directory is a compatibility location, not a dependency on Codex.
 
 Reuse the same session key for follow-up turns under the same Issue, OpenSpec change, or pull request. Use a new key when the objective or authority changes. Add `--rotate` to create a handoff and continue in a fresh session immediately.
 
@@ -140,7 +140,9 @@ The legacy DSH SDK backend (`DSH_SCOUT_BACKEND=sdk`) remains available as an exp
 
 Within a live session, the request history remains append-only, which preserves the provider's reusable KV-cache prefix. Cache reuse reduces repeated computation; it does not reduce context-window occupancy. Context thresholds use DSH's persisted `contextPressure.pressureTokens`, not cumulative billed usage.
 
-If the controller exits or the machine restarts, the next call starts a fresh live session and reports the loss of live context; historical sessions remain in DSH. A prompt timeout or requesting launcher disconnect also terminates the owned backend process group: the controller emits a specific failed-turn event, stays available, and lazily starts a fresh runtime and live session on the next prompt. Failed prompts are never retried automatically. In every case, the next delegation packet must re-establish authoritative state.
+If live context is lost after a failure, runtime death or controller restart, the next prompt is rejected **before dispatch**. After explicitly accepting that loss, supply `--new-session` and a complete fresh packet for the same key. Healthy sessions reject this flag; use normal follow-ups to retain history or `--rotate` for a live handoff. Failed prompts are never retried automatically. Retaining session history supports prefix reuse but cannot guarantee the provider's cache hit rate.
+
+Upgrading from XDG-based addressing: settle all old turns and deliberately stop the old controller(s) first. A live legacy PID in state blocks a new controller before state writes or runtime cleanup. The launcher never automatically kills a PID to resolve this migration. Existing running installations are not upgraded by a Git push.
 
 The controller state file records the session ID, `status: running`, active turn, and start time before it dispatches a prompt. This makes a long first turn distinguishable from a stalled or missing controller even before the model returns its final response. On the web backend the state also records the runtime origin/pid/generation — never the launch token.
 
@@ -172,7 +174,7 @@ Subscribe with the standalone watcher:
 
 The blocking launcher remains compatible and additionally prints the emitted lifecycle event (`event=... kind=... sequence=...`) to stderr so existing callers see the terminal outcome. While the prompt runs, the controller watches the launcher's Unix socket; closing the launcher cancels the active turn and prevents an orphaned writer. Prompt timeouts use failure reason `sdk-timeout` (SDK backend) or `web-timeout` (web backend), launcher disconnects use `client-disconnected`, and other prompt failures use `prompt-failed`. When an action envelope is valid and terminal, the control block is delivered only inside the supervision event; the launcher prints the cleaned assistant text, with oversized valid values clipped to their documented bounds. Malformed or non-terminal envelopes remain ordinary stdout verbatim. Session keys are bounded to at most 200 characters and rejected, never clipped, at prompt input and in the watcher.
 
-On the web backend, cancellation success requires a confirmed `turn/end` (or proven idle with no writer ever possible). When cancel is rejected, the confirmation window expires, the transport breaks, or ownership is ambiguous, the owned runtime process group is terminated BEFORE the terminal `turn_failed` event is appended and a fresh runtime/session starts on the next prompt — a possibly-active writer is never kept after a reported failure. Persisted sessions are reused only when both ownership and terminal state are proven.
+On the web backend, cancellation success requires a confirmed `turn/end` (or proven idle with no writer ever possible). When cancel is rejected, the confirmation window expires, the transport breaks, or ownership is ambiguous, the owned runtime process group is terminated BEFORE the terminal `turn_failed` event is appended and a fresh runtime/session requires an explicit `--new-session` acknowledgement — a possibly-active writer is never kept after a reported failure. Persisted sessions are reused only when both ownership and terminal state are proven.
 
 The detailed contract lives in [`docs/specifications/supervision-events.md`](docs/specifications/supervision-events.md).
 

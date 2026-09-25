@@ -39,9 +39,9 @@ until the turn ends; exit 75 means a competing request holds the mode lock.
 Use `--help` for supported flags. No host SDK or host-specific model is used:
 the selected DSH provider/model performs the delegated work.
 
-State stays under `${CODEX_HOME:-$HOME/.codex}/state/dsh-scout`; mode locks and
-sockets stay under `${XDG_RUNTIME_DIR:-/tmp}/codex-dsh-agent-<uid>`.
-Share these environment settings and the same user identity across hosts.
+State stays under `${CODEX_HOME:-$HOME/.codex}/state/dsh-scout`; request and owner locks live beside the resolved state file. Default sockets
+live under a private `/tmp/dsh-scout-<uid>-<state-hash>` directory, independent
+of `XDG_RUNTIME_DIR`. Share HOME/CODEX_HOME and user identity across hosts.
 Keep default socket/state paths; do not create per-host runtime roots to evade
 contention. Different installation locations still share the same lock domain.
 The legacy names do not require Codex to be installed or running.

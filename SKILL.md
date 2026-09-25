@@ -55,7 +55,7 @@ The launcher records exact DSH context pressure from the session store:
 
 Override the thresholds with `DSH_SCOUT_SOFT_CONTEXT_TOKENS` and `DSH_SCOUT_HARD_CONTEXT_TOKENS`. The soft value must remain below the hard value.
 
-Do not infer context size from cumulative billed usage. Cache reads reduce repeated computation but do not free context-window space. If the controller restarted, a prompt timed out, or its requesting host disconnected, the launcher reports that the live history was lost; send a new self-contained packet and re-check repository state. Failed prompts are never retried automatically.
+Do not infer context size from cumulative billed usage. Cache reads reduce repeated computation but do not free context-window space. If the controller restarted, a prompt timed out, or its requesting host disconnected, the launcher refuses continuation before dispatch. Report the loss and use `--new-session` only after an explicit decision to accept fresh context, with a new self-contained packet and re-checked repository state. Do not automatically acknowledge loss. `--new-session` rejects healthy sessions; `--rotate` remains a live handoff. Failed prompts are never retried automatically.
 
 ## Launch
 
@@ -77,19 +77,19 @@ For the optional second scout, use `--mode read` and a key ending in `:reader`. 
 
 The default backend is a scout-owned ordinary DSH web runtime. Immediately after dispatch, retrieve its authenticated URL with the same mode/cwd/provider/model and `--show-ui-url` (omit session-key and prompt-file). It works during a running turn. Open that URL for live progress and keep the same tab across turns. The normal prompt response prints only the token-free origin. Do not copy the authenticated URL into Issues, logs, or handoffs. A separate user-started DSH, such as port 3080, does not receive live events from this process.
 
-`DSH_SCOUT_BACKEND=sdk` explicitly selects the legacy SDK backend, which has no live scout UI. Never silently switch backends after failure. On any failed turn the controller stops its owned runtime before publishing failure; the next turn needs a complete packet. Historical sessions remain in DSH, but active context is not restored after a failure or controller restart. Never activate an active scout session in a second DSH host.
+`DSH_SCOUT_BACKEND=sdk` explicitly selects the legacy SDK backend, which has no live scout UI. Never silently switch backends after failure. On any failed turn the controller stops its owned runtime before publishing failure; the next turn requires explicit `--new-session` acknowledgement and a complete packet. Historical sessions remain in DSH, but active context is not restored after a failure or controller restart. Never activate an active scout session in a second DSH host.
 
 If the command yields a running session, supervise it with durable supervision events, not by asking the user to relay status. The next section is mandatory on every delegation.
 
 ## Supervise with durable events
 
-Every delegated DSH turn emits an append-only, user-private lifecycle event stream at `${CODEX_HOME:-$HOME/.codex}/state/dsh-scout/events/<mode>.events.jsonl`. All harnesses must use the same `HOME`, `CODEX_HOME` and `XDG_RUNTIME_DIR` environment for shared controller/state and locks. Keep the default socket/state paths. Installation location does not create a separate writer; changing runtime roots can break coordination. The legacy Codex directory names are compatibility paths and require no Codex process. Each record is a bounded JSON object with `kind` (`turn_started`, `turn_completed`, `turn_failed`, or terminal `action_required`), `sequence`, `event_id`, `mode`, `session_key`, `session_id`, `turn`, `emitted_at`, and, for terminal events, `verification_state: "pending"`. Prompts, responses, file contents, and secrets are never part of lifecycle events.
+Every delegated DSH turn emits an append-only, user-private lifecycle event stream at `${CODEX_HOME:-$HOME/.codex}/state/dsh-scout/events/<mode>.events.jsonl`. All harnesses must use the same `HOME` and `CODEX_HOME` (canonical state identity). Default sockets are derived from that identity and no longer depend on `XDG_RUNTIME_DIR`; request and owner locks live beside the state file, including for custom sockets. Keep default paths. A still-running legacy controller blocks migration: settle its turn and deliberately stop it before upgrading; never launch another owner to bypass this refusal. The legacy Codex directory names are compatibility paths and require no Codex process. Each record is a bounded JSON object with `kind` (`turn_started`, `turn_completed`, `turn_failed`, or terminal `action_required`), `sequence`, `event_id`, `mode`, `session_key`, `session_id`, `turn`, `emitted_at`, and, for terminal events, `verification_state: "pending"`. Prompts, responses, file contents, and secrets are never part of lifecycle events.
 
 **Supervision contract:**
 
 - Register supervision **immediately after dispatch**, using the host's asynchronous completion notification when it provides one; otherwise keep the request in the foreground and observe its terminal event directly. A filesystem event stream alone cannot wake an idle host that has no completion channel, and the launcher foreground fallback exists precisely so this contract does not silently vanish.
 - Subscribe from your persisted cursor: pass an exclusive `--after-sequence` (the greatest sequence you already processed) and deduplicate by `event_id`. Delivery is at-least-once.
-- Keep the launcher alive for the delegated turn. Cancelling it closes the request socket, terminates the active owned backend process group (SDK or web runtime), and emits `turn_failed`; the next prompt starts a fresh live session.
+- Keep the launcher alive for the delegated turn. Cancelling it closes the request socket, terminates the active owned backend process group (SDK or web runtime), and emits `turn_failed`; continuation is refused until explicit `--new-session` acknowledgement.
 - Verify the result independently per the verification handoff before reporting anything.
 - Remove the monitor after a terminal event (`turn_completed`, `turn_failed`, `action_required`); never keep a heartbeat running past the settled result.
 
