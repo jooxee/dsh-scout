@@ -807,6 +807,9 @@ class FakeLoopbackDsh:
         self._answer = "PONG"
         self._hold_until_session_cancel = threading.Event()
         self._follows: list[tuple[socket.socket, str]] = []
+        self.follow_requests: list[dict] = []
+        self.large_snapshot_on_followup = False
+        self.oversized_latest_message = False
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
@@ -1066,8 +1069,19 @@ class FakeLoopbackDsh:
         if first is None:
             return False
         stream_id = first["payload"].get("streamId", "")
+        follow_request = (
+            first["payload"].get("payload", {}).get("args", {}).get("request", {})
+        )
+        self.follow_requests.append(follow_request)
         self._follows.append((conn, stream_id))
         try:
+            session_id = follow_request.get("address", {}).get("sessionId")
+            previous_turns = self._sessions.get(session_id, {}).get("turn", 0)
+            too_much_history = self.oversized_latest_message or (
+                self.large_snapshot_on_followup
+                and previous_turns > 0
+                and follow_request.get("maxMessages", 50) > 1
+            )
             conn.sendall(
                 _ws_unmasked_frame(
                     json.dumps(
@@ -1078,6 +1092,9 @@ class FakeLoopbackDsh:
                                 "type": "snapshot",
                                 "header": {"cwd": self.cwd},
                                 "cursor": 0,
+                                "records": ["x" * (1 << 20)]
+                                if too_much_history
+                                else [],
                             },
                         }
                     ).encode()
@@ -1260,8 +1277,10 @@ class ControllerWebIntegrationTests(unittest.TestCase):
 
     def test_followup_reuses_history_and_rotation_replaces_live_session(self) -> None:
         fake = FakeLoopbackDsh()
-        fake._answer = ('Need input\n<dsh-scout-action-required-v1>\n'
-            '{"summary":"choice","questions":["Which?"]}\n</dsh-scout-action-required-v1>')
+        fake._answer = (
+            "Need input\n<dsh-scout-action-required-v1>\n"
+            '{"summary":"choice","questions":["Which?"]}\n</dsh-scout-action-required-v1>'
+        )
         backend = self._boot_daemon(fake)
         request = {
             "action": "prompt",
@@ -1297,6 +1316,70 @@ class ControllerWebIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 saved["verification_facts"]["pre_prompt"], {"available": False}
             )
+        finally:
+            backend.terminate()
+            fake._stop.set()
+            fake.server.close()
+            for conn, _ in fake._follows:
+                conn.close()
+
+    def test_long_history_followup_keeps_same_live_session(self) -> None:
+        fake = FakeLoopbackDsh()
+        fake.large_snapshot_on_followup = True
+        backend = self._boot_daemon(fake)
+        request = {
+            "action": "prompt",
+            "session_key": "long-history",
+            "prompt": "PONG",
+            "timeout": 5,
+        }
+        try:
+            with (
+                mock.patch.object(
+                    controller,
+                    "wait_session_stats",
+                    return_value={"context_tokens": 10},
+                ),
+                mock.patch.object(
+                    controller, "repository_facts", return_value={"available": False}
+                ),
+            ):
+                first = self._daemon.handle(request)
+                second = self._daemon.handle(request)
+            self.assertTrue(first["ok"] and second["ok"])
+            self.assertEqual(first["session_id"], second["session_id"])
+            self.assertEqual(second["turns"], 2)
+            self.assertEqual(
+                [item["maxMessages"] for item in fake.follow_requests], [1, 1]
+            )
+        finally:
+            backend.terminate()
+            fake._stop.set()
+            fake.server.close()
+            for conn, _ in fake._follows:
+                conn.close()
+
+    def test_oversized_latest_message_fails_with_bounded_cause(self) -> None:
+        fake = FakeLoopbackDsh()
+        fake.oversized_latest_message = True
+        backend = self._boot_daemon(fake)
+        try:
+            with self.assertRaisesRegex(
+                dsh_web.TransportError,
+                "follow reader failed: WebSocket frame exceeds bounded size",
+            ) as failure:
+                self._daemon.handle(
+                    {
+                        "action": "prompt",
+                        "session_key": "oversized-latest",
+                        "prompt": "PONG",
+                        "timeout": 5,
+                    }
+                )
+            self.assertLess(len(str(failure.exception)), 120)
+            self.assertEqual(
+                [session["turn"] for session in fake._sessions.values()], [0]
+            )  # Session exists, but no prompt was admitted.
         finally:
             backend.terminate()
             fake._stop.set()
