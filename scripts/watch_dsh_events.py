@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -24,6 +25,7 @@ from typing import Any
 CURSOR_DEFAULT = 0
 POLL_INTERVAL_SECONDS = 0.2
 TIMEOUT_EXIT = 42
+TIMEOUT_MAX_SECONDS = 86400.0
 TERMINAL_EVENT_KINDS = frozenset({"action_required", "turn_completed", "turn_failed"})
 SESSION_KEY_LIMIT = 200
 
@@ -122,8 +124,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.after_sequence < 0:
         parser.error("--after-sequence must be non-negative")
+    if not math.isfinite(args.timeout_seconds):
+        parser.error("--timeout-seconds must be a finite number")
     if args.timeout_seconds <= 0:
         parser.error("--timeout-seconds must be positive")
+    if args.timeout_seconds > TIMEOUT_MAX_SECONDS:
+        parser.error(f"--timeout-seconds must be at most {TIMEOUT_MAX_SECONDS:g}")
     if not args.session_key.strip():
         parser.error("--session-key must be a non-empty string")
     if len(args.session_key) > SESSION_KEY_LIMIT:

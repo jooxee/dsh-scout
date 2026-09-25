@@ -182,17 +182,30 @@ class SupervisionEvents:
                 greatest = max(greatest, value["sequence"])
         return max(0, greatest)
 
-    def recovery_keys(self) -> set[str]:
-        """Session keys with a durable controller-restart recovery failure."""
-        keys: set[str] = set()
+    def recovery_records(self) -> set[tuple[str, str | None, int]]:
+        """Controller-derived identities of durable restart recovery failures.
+
+        The identity is ``(session_key, session_id, turn)``: only an exact
+        match proves that recovery already happened for that exact abandoned
+        turn, so a later fresh DSH session reusing the same key still gets its
+        own recovery event.
+        """
+        records: set[tuple[str, str | None, int]] = set()
         for event in self.records():
             if (
                 event.get("kind") == "turn_failed"
                 and event.get("reason") == RECOVERY_REASON
                 and isinstance(event.get("session_key"), str)
+                and isinstance(event.get("sequence"), int)
+                and isinstance(event.get("turn"), int)
             ):
-                keys.add(event["session_key"])
-        return keys
+                session_id_value = event.get("session_id")
+                if session_id_value is not None and not isinstance(session_id_value, str):
+                    session_id_value = str(session_id_value)[:SUPERVISION_ERROR_LIMIT]
+                records.add(
+                    (event["session_key"][:SUPERVISION_ERROR_LIMIT], session_id_value, event["turn"])
+                )
+        return records
 
     def append(
         self,
@@ -589,9 +602,14 @@ class SessionDaemon:
         derived evidence of an earlier recovery for the same session key, so a
         crash between event append and state persistence cannot duplicate it.
         """
-        recovered_keys = self.events.recovery_keys()
+        recovered_records = self.events.recovery_records()
         for key, record in self.sessions.items():
-            if key in recovered_keys:
+            identity = (
+                key[:SUPERVISION_ERROR_LIMIT],
+                record.get("previous_session_id"),
+                recovery_turn(record.get("previous_active_turn")),
+            )
+            if identity in recovered_records:
                 record["recovered"] = True
                 continue
             if not self._needs_recovery(record):

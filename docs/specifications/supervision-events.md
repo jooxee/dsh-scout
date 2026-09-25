@@ -102,7 +102,8 @@ Provide a watcher command that accepts:
 
 - mode and session key;
 - an exclusive `after_sequence` cursor;
-- a bounded timeout;
+- a bounded, finite timeout (at most 86,400 seconds; non-finite, zero or
+  negative values are rejected before waiting);
 - optional terminal-only filtering.
 
 It waits for the first matching event, writes exactly one JSON object to
@@ -153,10 +154,12 @@ diff, tests and external records.
   greatest valid record.
 - If the controller died while a session was recorded as running, startup
   emits one `turn_failed` recovery event identifying controller restart; it
-  does not claim DSH completion. Recovery emission is deduplicated durably:
-  an existing recovery record for the same session key in the stream is
-  controller-derived evidence that recovery already happened, so a crash
-  between append and state persistence cannot emit a duplicate.
+  does not claim DSH completion. Recovery emission is deduplicated durably
+  and per abandoned turn: an existing controller-restart recovery record is
+  evidence only when its ``(session_key, session_id, turn)`` identity matches
+  the recorded running session exactly, so a crash between append and state
+  persistence cannot emit a duplicate and a later fresh session reusing the
+  same session key still gets its own recovery event.
 - Event append failure must not be hidden. The prompt request fails and the
   state records a bounded supervision error because silent completion would
   recreate the original problem.

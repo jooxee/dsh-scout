@@ -418,6 +418,34 @@ class RestartRecoveryTests(unittest.TestCase):
             kinds = [e["kind"] for e in read_events(root / EVENTS_FILE)]
             self.assertEqual(kinds, ["turn_failed", "turn_started", "turn_completed"])
 
+    def test_recovery_identity_key_mismatch_appends_new_recovery(self) -> None:
+        # A pre-existing recovery for this key must NOT suppress a later,
+        # different abandoned turn even though the session key is identical.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state_path = root / "write.json"
+            events_path = root / EVENTS_FILE
+            controller.atomic_json(
+                state_path,
+                {"version": 1, "sessions": {SESSION_KEY: {"session_id": "s-new", "status": "running", "active_turn": 4}}},
+            )
+            stream = controller.SupervisionEvents(events_path, "write")
+            stream.append(
+                kind="turn_failed",
+                session_key=SESSION_KEY,
+                session_id_value="s-old",
+                turn=2,
+                reason=controller.RECOVERY_REASON,
+            )
+            daemon = self.make_restarted_daemon(state_path, root)
+            events = read_events(events_path)
+            recoveries = [e for e in events if e.get("reason") == controller.RECOVERY_REASON]
+            self.assertEqual(len(recoveries), 2)
+            self.assertEqual(recoveries[1]["session_id"], "s-new")
+            self.assertEqual(recoveries[1]["turn"], 4)
+            self.assertEqual(recoveries[1]["sequence"], 2)
+            self.assertTrue(daemon.sessions[SESSION_KEY]["recovered"])
+
     def test_stream_evidence_prevents_duplicate_recovery_after_crash(self) -> None:
         # Simulate the crash window: the recovery record was appended, but the
         # controller died before persisting `recovered` in the state file.

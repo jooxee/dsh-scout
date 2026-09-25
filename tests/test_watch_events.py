@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 
+
 SCRIPT = Path(__file__).parents[1] / "scripts/watch_dsh_events.py"
 SPEC = importlib.util.spec_from_file_location("watch_dsh_events", SCRIPT)
 assert SPEC and SPEC.loader
@@ -156,6 +157,16 @@ class WatcherIntegrationTests(unittest.TestCase):
         self.assertEqual(completed.stdout, "")
         self.assertIn("at most 200", completed.stderr)
 
+    def test_non_finite_timeout_rejected_by_cli_before_waiting(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = self.run_watcher(
+                Path(temporary), "--mode", "write", "--session-key", SESSION_KEY, "--timeout-seconds", "inf"
+            )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertNotEqual(completed.returncode, watcher.TIMEOUT_EXIT)
+        self.assertEqual(completed.stdout, "")
+        self.assertIn("finite", completed.stderr)
+
     def test_session_key_at_limit_is_watched(self) -> None:
         max_key = "r:" + "a" * (watcher.SESSION_KEY_LIMIT - 2)
         self.assertEqual(len(max_key), watcher.SESSION_KEY_LIMIT)
@@ -167,6 +178,28 @@ class WatcherIntegrationTests(unittest.TestCase):
             )
         self.assertEqual(completed.returncode, 0)
         self.assertEqual(json.loads(completed.stdout.strip())["session_key"], max_key)
+
+
+class TimeoutArgumentTests(unittest.TestCase):
+    base = ["--mode", "write", "--session-key", SESSION_KEY]
+
+    def parse(self, *timeout: str):
+        extra = ["--timeout-seconds", *timeout] if timeout else []
+        return watcher.parse_args([*self.base, *extra])
+
+    def expect_reject(self, value: str) -> None:
+        with self.assertRaises(SystemExit) as caught:
+            self.parse(value)
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_default_timeout_is_bounded_and_accepted(self) -> None:
+        self.assertEqual(self.parse().timeout_seconds, 3600.0)
+        self.assertEqual(self.parse("86400").timeout_seconds, 86400.0)
+        self.assertEqual(self.parse("0.25").timeout_seconds, 0.25)
+
+    def test_non_finite_and_non_positive_timeouts_are_rejected(self) -> None:
+        for value in ("nan", "inf", "-inf", "0", "-0.5", "86401"):
+            self.expect_reject(value)
 
 
 if __name__ == "__main__":
