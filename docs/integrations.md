@@ -60,10 +60,13 @@ in the foreground and wait. Merely starting a detached watcher does not make
 an idle agent resume. Remove any monitor when the turn terminates; independently
 verify the repository before claiming success.
 
-Retrieve `--show-ui-url` using the same mode, cwd and approved provider/model.
-That scout-owned DSH UI receives live activity. Keep its authentication URL
-private. A separately started DSH host only shares persisted history and must
-not activate the active scout session.
+Use `scripts/scout_status.py --mode MODE --session-key KEY` for a compact
+read-only snapshot and `watch_dsh_events.py --terminal-only` for completion.
+`--details` adds bounded diagnostics. Retrieve `--show-ui-url` using the same
+mode, cwd and approved provider/model when full live activity is needed for a
+specific diagnosis or verification. Keep its authentication URL private. A
+separately started DSH host only shares persisted history and must not activate
+the active scout session.
 
 ## Limits and evidence
 

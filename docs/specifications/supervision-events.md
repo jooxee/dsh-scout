@@ -73,6 +73,14 @@ The controller stores the latest event and sequence in the corresponding
 session state as a convenience. The append-only stream remains the cursor
 authority so a subscriber cannot miss a fast start-to-terminal transition.
 
+For a cheap point-in-time question, `scripts/scout_status.py --mode MODE
+--session-key KEY` prints one compact JSON snapshot. It reads only local
+state and `/proc` identity, never DSH or its transcript. A recorded running
+turn is marked active only when the expected controller and web runtime
+processes match; that is liveness, not proof of model progress. `--details`
+adds bounded diagnostic metadata on demand. Terminal events remain the
+authoritative transition stream and independent verification remains pending.
+
 ## Action-required contract
 
 The delegation preamble tells the scout to stop its current turn when it needs

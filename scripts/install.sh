@@ -154,6 +154,7 @@ install_payload() {
     install -m 0755 "$module" "$dest/scripts/dsh_web/$(basename "$module")"
   done
   install -m 0755 "$repo_root/scripts/watch_dsh_events.py" "$dest/scripts/watch_dsh_events.py"
+  install -m 0755 "$repo_root/scripts/scout_status.py" "$dest/scripts/scout_status.py"
   for module in "$repo_root/docs/specifications/"*.md; do
     [[ -e "$module" ]] || continue
     install -m 0644 "$module" "$dest/docs/specifications/$(basename "$module")"

@@ -91,6 +91,14 @@ Reuse the same session key for follow-up turns under the same Issue, OpenSpec ch
 
 The optional reader uses the same command with `--mode read` and a key such as `project:issue-123:reader`.
 
+For a short current-state check, use `scripts/scout_status.py --mode read
+--session-key project:issue-123:reader`. It reads local state and process
+identity without starting DSH or using model tokens. The default one-line JSON
+reports lifecycle and liveness; `--details` adds bounded diagnostics. Wait for
+terminal events with `scripts/watch_dsh_events.py --terminal-only` instead of
+repeatedly opening the live transcript. A `running` snapshot confirms matching
+processes and a recorded turn, not model progress.
+
 ### Surfacing the scout UI URL
 
 On the default web backend, the prompt response includes the token-free UI
@@ -205,7 +213,7 @@ Only one request per mode can run at once. File locks permit one writer and one 
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile scripts/run_dsh_session.py scripts/watch_dsh_events.py scripts/dsh_web/*.py
+python3 -m py_compile scripts/run_dsh_session.py scripts/watch_dsh_events.py scripts/scout_status.py scripts/dsh_web/*.py
 bash -n scripts/run-dsh-agent.sh scripts/install.sh
 ```
 
