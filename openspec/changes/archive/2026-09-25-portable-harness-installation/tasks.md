@@ -5,5 +5,5 @@
 
 ## 2. Verification and delivery
 - [x] 2.1 Independently review changes and run applicable full tests, syntax checks and strict spec validation.
-- [ ] 2.2 Record evidence and limits, sync specifications and archive the completed change.
-- [ ] 2.3 Scoped commit/push to main, update current installed skill, verify package, and close Issue #7 after CI.
+- [x] 2.2 Record evidence and limits, sync specifications and archive the completed change.
+- [x] 2.3 Scoped commit/push to main, update current installed skill, verify package and successful CI. Issue closure follows the final evidence push.

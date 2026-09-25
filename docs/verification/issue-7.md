@@ -52,6 +52,16 @@ The model-approval rule is an instruction contract in the canonical skill,
 not a runtime allowlist or enforced spending limit. CLI defaults are preserved
 for compatibility and do not grant model-selection authority.
 
+## Delivery
+
+Implementation `8e74be1` is committed and pushed to `origin/main`.
+[GitHub Actions](https://github.com/jooxee/dsh-scout/actions/runs/36159523398)
+passed. The current Codex skill installation was updated with `--force`;
+all 18 payload files match the repository byte-for-byte and both installed
+CLI help commands succeed. Other host presets were installed only in isolated
+test homes; no user's other harness configuration was modified. No deployment
+or new paid scout acceptance run occurred.
+
 ## Acceptance boundary
 
 Native documentation establishes supported discovery locations. Isolated
