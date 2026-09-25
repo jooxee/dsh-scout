@@ -22,18 +22,20 @@ import fcntl
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
-import selectors
-import signal
 import select
+import selectors
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
 import uuid
+from collections.abc import Generator, Mapping
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 # Web backend module lives beside this script; make the import work both when
@@ -42,7 +44,6 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 import dsh_web  # noqa: E402
-
 
 DEFAULT_TIMEOUT = 3600
 ACTION_OPEN = "<dsh-scout-action-required-v1>"
@@ -1082,6 +1083,9 @@ class SessionDaemon:
             return err
         key, prompt, timeout = valid
         self._reset_dead_web()
+        error = self._check_continuation(key, request)
+        if error is not None:
+            return {"ok": False, "error": error}
         current = self._session(key)
         restarted = bool(current.pop("restarted", False))
         for stale in ("previous_session_id", "previous_status", "previous_active_turn", "recovered"):
@@ -1095,6 +1099,22 @@ class SessionDaemon:
             current=current,
             restarted=restarted,
         )
+
+    def _check_continuation(self, key: str, request: Mapping[str, object]) -> str | None:
+        current = self.sessions.get(key)
+        lost = current is not None and (
+            current.get("live_session_lost") or "session_id" not in current
+        )
+        acknowledge = request.get("new_session", False)
+        if type(acknowledge) is not bool:
+            return "new_session must be a boolean"
+        if acknowledge and request.get("rotate"):
+            return "--new-session cannot be combined with --rotate"
+        if lost and not acknowledge:
+            return "Live session context was lost; use --new-session with a fresh packet to acknowledge restart"
+        if acknowledge and current is not None and not lost:
+            return "Live session still exists; continue it or use --rotate for a handoff"
+        return None
 
     def _run_prompt_after_bootstrap(
         self,
@@ -1550,6 +1570,37 @@ def daemon_command(args: argparse.Namespace, script: Path) -> list[str]:
     ]
 
 
+def assert_no_legacy_owner(state_path: Path) -> None:
+    """Do not reap a runtime belonging to a still-live pre-lock controller."""
+    pid = read_json(state_path).get("pid")
+    if type(pid) is not int or pid <= 0 or pid == os.getpid():
+        return
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        pass  # Uncertain identity is not permission to take ownership.
+    raise RuntimeError(
+        "A live controller owner is recorded for this state; settle its turns "
+        "and stop the legacy controller explicitly before migration."
+    )
+
+
+@contextmanager
+def daemon_ownership(state_path: Path) -> Generator[None, None, None]:
+    """Lease the state before loading it, reaping children, or binding a socket."""
+    state_path = state_path.resolve()
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    with state_path.with_suffix(".owner.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError("Another controller owner holds this state") from error
+        assert_no_legacy_owner(state_path)
+        yield
+
+
 def ensure_daemon(args: argparse.Namespace) -> None:
     if daemon_alive(
         args.socket,
@@ -1564,6 +1615,7 @@ def ensure_daemon(args: argparse.Namespace) -> None:
         stop_daemon(args.socket)
         if args.socket.exists():
             raise RuntimeError("previous controller did not stop; refusing another owner")
+    assert_no_legacy_owner(args.state_file)
     log_path = args.state_file.parent / f"{args.mode}-controller.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log = log_path.open("a")
@@ -1597,7 +1649,8 @@ def client_main(args: argparse.Namespace) -> int:
         return _client_show_ui_url(args)
     args.runtime_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(args.runtime_dir, 0o700)
-    with (args.runtime_dir / f"{args.mode}.lock").open("w") as lock:
+    args.state_file.parent.mkdir(parents=True, exist_ok=True)
+    with args.state_file.with_suffix(".request.lock").open("a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -1637,6 +1690,7 @@ def _client_dispatch_prompt(args: argparse.Namespace) -> int:
             "prompt": prompt,
             "timeout": args.timeout_seconds,
             "rotate": args.rotate,
+            "new_session": args.new_session,
         },
         args.timeout_seconds + 60,
     )
@@ -1732,6 +1786,8 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="execution backend; defaults to DSH_SCOUT_BACKEND (web)",
     )
+    parser.add_argument("--new-session", action="store_true",
+                        help="explicitly acknowledge lost context and start fresh for this key")
     parser.add_argument(
         "--show-ui-url",
         action="store_true",
@@ -1741,16 +1797,19 @@ def _build_argument_parser() -> argparse.ArgumentParser:
 
 
 def _apply_default_paths(args: argparse.Namespace) -> None:
-    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / f"codex-dsh-agent-{os.getuid()}"
     state_root = CODEX_HOME / "state/dsh-scout"
+    args.state_file = (args.state_file or state_root / f"{args.mode}.json").resolve()
+    identity = hashlib.sha256(os.fsencode(args.state_file)).hexdigest()[:20]
+    runtime = Path("/tmp") / f"dsh-scout-{os.getuid()}-{identity}"
     args.runtime_dir = runtime
-    args.socket = args.socket or runtime / f"{args.mode}.sock"
-    args.state_file = args.state_file or state_root / f"{args.mode}.json"
+    args.socket = (args.socket or runtime / f"{args.mode}.sock").resolve()
 
 
 def _validate_client_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if args.timeout_seconds <= 0:
         parser.error("--timeout-seconds must be positive")
+    if args.new_session and args.rotate:
+        parser.error("--new-session cannot be combined with --rotate")
     if args.serve:
         return
     if args.show_ui_url:
@@ -1764,16 +1823,15 @@ def _validate_client_args(parser: argparse.ArgumentParser, args: argparse.Namesp
 
 
 def _validate_show_ui_url_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    if args.prompt_file is not None or args.session_key is not None or args.rotate:
-        parser.error("--show-ui-url cannot be combined with --prompt-file/--session-key/--rotate")
+    if args.prompt_file is not None or args.session_key is not None or args.rotate or args.new_session:
+        parser.error("--show-ui-url cannot be combined with prompt or session options")
 
 
 def main() -> int:
     args = parse_args()
     if args.serve:
         args.runtime_dir.mkdir(parents=True, exist_ok=True)
-        with (args.runtime_dir / f"{args.mode}.daemon.lock").open("w") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with daemon_ownership(args.state_file):
             return SessionDaemon(args.mode, args.cwd, args.socket, args.state_file,
                                  backend=args.backend).serve()
     return client_main(args)

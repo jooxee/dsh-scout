@@ -1260,6 +1260,8 @@ class ControllerWebIntegrationTests(unittest.TestCase):
 
     def test_followup_reuses_history_and_rotation_replaces_live_session(self) -> None:
         fake = FakeLoopbackDsh()
+        fake._answer = ('Need input\n<dsh-scout-action-required-v1>\n'
+            '{"summary":"choice","questions":["Which?"]}\n</dsh-scout-action-required-v1>')
         backend = self._boot_daemon(fake)
         request = {
             "action": "prompt",
@@ -1279,6 +1281,10 @@ class ControllerWebIntegrationTests(unittest.TestCase):
                 ),
             ):
                 first = self._daemon.handle(request)
+                self.assertEqual(first["event"]["kind"], "action_required")
+                ui = self._daemon.handle({"action": "ui-url"})
+                self.assertTrue(ui["url"].startswith(fake.origin))
+                fake._answer = "PONG"
                 second = self._daemon.handle(request)
                 third = self._daemon.handle({**request, "rotate": True})
             self.assertEqual(first["session_id"], second["session_id"])

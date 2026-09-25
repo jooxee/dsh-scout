@@ -168,10 +168,10 @@ diff, tests and external records.
   confirmed `turn/end` (or proven idle with no writer ever possible): cancel
   rejection, confirmation timeout, broken transport, or ambiguous ownership
   terminates the owned runtime process group BEFORE the terminal event is
-  published, records `live_session_lost`, and the next prompt starts a fresh
+  published, records `live_session_lost`, and an explicitly acknowledged `--new-session` prompt starts a fresh
   runtime generation. Persisted sessions are reused only when ownership and
   terminal state are both proven.
-- The controller stays available after invalidation. The next prompt lazily
+- The controller stays available after invalidation. Only an explicitly acknowledged `--new-session` prompt
   starts a fresh backend process, creates a fresh live session, and reports
   `restarted: true`; it never retries the failed prompt automatically.
 - If the controller died while a session was recorded as running, startup
@@ -206,7 +206,7 @@ Unit tests must cover:
 
 - ordered start/completed and start/failed events;
 - timeout and requesting-client disconnect abort the SDK, emit their specific
-  failure reasons, and force a fresh session on the next prompt;
+  failure reasons, and require explicit `--new-session` acknowledgement before a fresh session;
 - terminal action-envelope recognition and strict rejection of malformed,
   oversized or non-terminal lookalikes;
 - cursor filtering, terminal filtering, timeout and duplicate-safe event ids;

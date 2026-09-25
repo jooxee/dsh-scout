@@ -289,7 +289,7 @@ class HandleEventOrderTests(unittest.TestCase):
         self.assertTrue(failed_state["live_session_lost"])
 
         with mock.patch.object(controller, "DshSdk", return_value=replacement):
-            response = run_prompt(daemon)
+            response = run_prompt(daemon, new_session=True)
 
         self.assertTrue(response["restarted"])
         self.assertNotEqual(replacement.identifier, failed_session_id)
