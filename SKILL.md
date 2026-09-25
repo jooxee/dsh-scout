@@ -47,7 +47,7 @@ The launcher records exact DSH context pressure from the session store:
 
 Override the thresholds with `DSH_SCOUT_SOFT_CONTEXT_TOKENS` and `DSH_SCOUT_HARD_CONTEXT_TOKENS`. The soft value must remain below the hard value.
 
-Do not infer context size from cumulative billed usage. Cache reads reduce repeated computation but do not free context-window space. If the controller had to restart, the launcher reports that the live history was lost; send a new self-contained packet and re-check repository state.
+Do not infer context size from cumulative billed usage. Cache reads reduce repeated computation but do not free context-window space. If the controller restarted, a prompt timed out, or its requesting launcher disconnected, the launcher reports that the live history was lost; send a new self-contained packet and re-check repository state. Failed prompts are never retried automatically.
 
 ## Launch
 
@@ -73,6 +73,7 @@ Every delegated DSH turn emits an append-only, user-private lifecycle event stre
 
 - Register supervision **immediately after dispatch**, using the host's asynchronous notification or a quiet Codex heartbeat; never ask the user to relay DSH status or output.
 - Subscribe from your persisted cursor: pass an exclusive `--after-sequence` (the greatest sequence you already processed) and deduplicate by `event_id`. Delivery is at-least-once.
+- Keep the launcher alive for the delegated turn. Cancelling it closes the request socket, terminates the active SDK process group, and emits `turn_failed`; the next prompt starts a fresh live session.
 - Verify the result independently per the verification handoff before reporting anything.
 - Remove the monitor after a terminal event (`turn_completed`, `turn_failed`, `action_required`); never keep a heartbeat running past the settled result.
 

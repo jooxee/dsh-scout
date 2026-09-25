@@ -2,9 +2,12 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
+import socket
 import stat
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -112,6 +115,25 @@ class SupervisionEventsTests(unittest.TestCase):
             events = controller.SupervisionEvents(Path(temporary) / "e.jsonl", "write")
             with self.assertRaises(ValueError):
                 events.append(kind="text", session_key=SESSION_KEY, session_id_value="s1", turn=1)
+
+
+class DshSdkCancellationTests(unittest.TestCase):
+    def test_read_frame_stops_when_requesting_client_disconnects(self) -> None:
+        read_fd, write_fd = os.pipe()
+        sdk_output = os.fdopen(read_fd, "r")
+        request_socket, client_socket = socket.socketpair()
+        self.addCleanup(sdk_output.close)
+        self.addCleanup(lambda: os.close(write_fd))
+        self.addCleanup(request_socket.close)
+
+        sdk = object.__new__(controller.DshSdk)
+        sdk.process = mock.Mock()
+        sdk.process.stdout = sdk_output
+        sdk.process.poll.return_value = None
+
+        client_socket.close()
+        with self.assertRaises(controller.ClientDisconnectedError):
+            sdk._read_frame(time.monotonic() + 1, client_socket=request_socket)
 
 
 class HandleEventOrderTests(unittest.TestCase):
@@ -230,6 +252,93 @@ class HandleEventOrderTests(unittest.TestCase):
         self.assertEqual(events[1]["reason"], "prompt-failed")
         self.assertEqual(events[1]["verification_state"], "pending")
         self.assertEqual(state["last_event"]["kind"], "turn_failed")
+
+    def test_timeout_discards_sdk_and_restarts_with_a_fresh_live_session(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        daemon = make_daemon(root, None)
+
+        class TimedOutSdk:
+            aborted = False
+
+            def prompt(self, identifier, text, timeout):
+                self.identifier = identifier
+                raise TimeoutError("Timed out waiting for DSH SDK")
+
+            def abort(self):
+                self.aborted = True
+
+        class ReplacementSdk:
+            def prompt(self, identifier, text, timeout):
+                self.identifier = identifier
+                return "recovered"
+
+        timed_out = TimedOutSdk()
+        replacement = ReplacementSdk()
+        daemon.sdk = timed_out
+
+        with self.assertRaises(TimeoutError):
+            run_prompt(daemon)
+
+        failed_session_id = timed_out.identifier
+        self.assertTrue(timed_out.aborted)
+        self.assertIsNone(daemon.sdk)
+        failed_state = controller.read_json(daemon.state_path)["sessions"][SESSION_KEY]
+        self.assertEqual(failed_state["status"], "error")
+        self.assertTrue(failed_state["live_session_lost"])
+
+        with mock.patch.object(controller, "DshSdk", return_value=replacement):
+            response = run_prompt(daemon)
+
+        self.assertTrue(response["restarted"])
+        self.assertNotEqual(replacement.identifier, failed_session_id)
+        self.assertEqual(response["text"], "recovered")
+        events = read_events(root / EVENTS_FILE)
+        self.assertEqual(
+            [event["kind"] for event in events],
+            ["turn_started", "turn_failed", "turn_started", "turn_completed"],
+        )
+        self.assertEqual(events[1]["reason"], "sdk-timeout")
+
+    def test_client_disconnect_aborts_sdk_and_emits_specific_failure(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        daemon = make_daemon(root, None)
+        request_socket, client_socket = socket.socketpair()
+        self.addCleanup(request_socket.close)
+        self.addCleanup(client_socket.close)
+
+        class DisconnectedSdk:
+            aborted = False
+
+            def prompt(self, identifier, text, timeout, client_socket=None):
+                self.client_socket = client_socket
+                raise controller.ClientDisconnectedError("DSH request client disconnected")
+
+            def abort(self):
+                self.aborted = True
+
+        sdk = DisconnectedSdk()
+        daemon.sdk = sdk
+        with self.assertRaises(controller.ClientDisconnectedError):
+            with mock.patch.object(controller, "repository_facts", return_value={"available": False}):
+                daemon.handle(
+                    {
+                        "action": "prompt",
+                        "session_key": SESSION_KEY,
+                        "prompt": "Do one bounded task.",
+                        "timeout": 30,
+                    },
+                    client_socket=request_socket,
+                )
+
+        self.assertIs(sdk.client_socket, request_socket)
+        self.assertTrue(sdk.aborted)
+        events = read_events(root / EVENTS_FILE)
+        self.assertEqual([event["kind"] for event in events], ["turn_started", "turn_failed"])
+        self.assertEqual(events[1]["reason"], "client-disconnected")
 
     def test_append_failure_fails_prompt_visibly(self) -> None:
         temporary = tempfile.TemporaryDirectory()

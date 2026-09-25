@@ -124,6 +124,10 @@ heartbeat or use the host's asynchronous `notify` facility immediately after
 dispatch; the monitor stays quiet while the event cursor has not advanced and
 removes itself after a terminal event.
 
+While a prompt is active, the controller also watches the requesting launcher's
+Unix socket. End-of-file means the launcher stopped waiting, so the controller
+must terminate that DSH turn instead of allowing an orphaned writer to continue.
+
 ## State transitions
 
 ```text
@@ -137,9 +141,11 @@ dispatch accepted
      -> ordinary idle result
         -> persist idle + verification pending
         -> append turn_completed
-     -> error / timeout
+     -> error / timeout / requesting client disconnect
         -> persist error
+        -> terminate the DSH SDK process group
         -> append turn_failed
+        -> invalidate every live session owned by that SDK
 ```
 
 A terminal lifecycle event is emitted only after its corresponding state has
@@ -152,6 +158,14 @@ diff, tests and external records.
 
 - Controller restart keeps prior events and continues the sequence above the
   greatest valid record.
+- A prompt timeout emits `turn_failed` with reason `sdk-timeout`; a requesting
+  client disconnect emits it with reason `client-disconnected`. Both terminate
+  the SDK process group before the terminal event is published. Any other
+  prompt failure uses reason `prompt-failed` and follows the same invalidation
+  path because the SDK stream can no longer prove a reusable live session.
+- The controller stays available after invalidation. The next prompt lazily
+  starts a fresh SDK process, creates a fresh live session, and reports
+  `restarted: true`; it never retries the failed prompt automatically.
 - If the controller died while a session was recorded as running, startup
   emits one `turn_failed` recovery event identifying controller restart; it
   does not claim DSH completion. Recovery emission is deduplicated durably
@@ -183,6 +197,8 @@ diff, tests and external records.
 Unit tests must cover:
 
 - ordered start/completed and start/failed events;
+- timeout and requesting-client disconnect abort the SDK, emit their specific
+  failure reasons, and force a fresh session on the next prompt;
 - terminal action-envelope recognition and strict rejection of malformed,
   oversized or non-terminal lookalikes;
 - cursor filtering, terminal filtering, timeout and duplicate-safe event ids;

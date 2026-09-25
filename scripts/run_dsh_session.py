@@ -37,12 +37,17 @@ ACTION_QUESTIONS_LIMIT = 3
 TERMINAL_EVENT_KINDS = {"action_required", "turn_completed", "turn_failed"}
 SUPERVISION_ERROR_LIMIT = 200
 SESSION_KEY_LIMIT = 200
+SDK_ABORT_TIMEOUT_SECONDS = 5
 ACTION_PATTERN = re.compile(
     rf"{re.escape(ACTION_OPEN)}\s*\n(.*?)\n{re.escape(ACTION_CLOSE)}\s*$",
     re.DOTALL,
 )
 
 RECOVERY_REASON = "controller-restart-recovery"
+
+
+class ClientDisconnectedError(ConnectionError):
+    """The launcher stopped waiting while its DSH turn was still active."""
 
 
 def positive_env_int(name: str, default: int) -> int:
@@ -276,6 +281,7 @@ class DshSdk:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            start_new_session=True,
         )
         assert self.process.stdin is not None
         assert self.process.stdout is not None
@@ -314,15 +320,37 @@ class DshSdk:
         self.process.stdin.flush()
         return request_id
 
-    def _read_frame(self, deadline: float) -> dict[str, Any]:
+    def _read_frame(
+        self,
+        deadline: float,
+        client_socket: socket.socket | None = None,
+    ) -> dict[str, Any]:
         assert self.process.stdout is not None
         selector = selectors.DefaultSelector()
-        selector.register(self.process.stdout, selectors.EVENT_READ)
+        selector.register(self.process.stdout, selectors.EVENT_READ, "sdk")
+        if client_socket is not None:
+            selector.register(client_socket, selectors.EVENT_READ, "client")
         try:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or not selector.select(remaining):
-                raise TimeoutError("Timed out waiting for DSH SDK")
-            line = self.process.stdout.readline()
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Timed out waiting for DSH SDK")
+                ready = selector.select(remaining)
+                if not ready:
+                    raise TimeoutError("Timed out waiting for DSH SDK")
+                for key, _ in ready:
+                    if key.data != "client":
+                        continue
+                    try:
+                        client_data = client_socket.recv(1, socket.MSG_PEEK) if client_socket is not None else b""
+                    except OSError as error:
+                        raise ClientDisconnectedError("DSH request client disconnected") from error
+                    if client_data == b"":
+                        raise ClientDisconnectedError("DSH request client disconnected")
+                    raise ConnectionError("DSH request client sent unexpected data")
+                if any(key.data == "sdk" for key, _ in ready):
+                    line = self.process.stdout.readline()
+                    break
         finally:
             selector.close()
         if not line:
@@ -336,7 +364,13 @@ class DshSdk:
             if frame.get("id") == request_id:
                 return frame
 
-    def prompt(self, identifier: str, text: str, timeout: int) -> str:
+    def prompt(
+        self,
+        identifier: str,
+        text: str,
+        timeout: int,
+        client_socket: socket.socket | None = None,
+    ) -> str:
         request_id = self._send(
             "session/prompt",
             {
@@ -350,7 +384,7 @@ class DshSdk:
         latest_text = ""
         failure: str | None = None
         while True:
-            frame = self._read_frame(deadline)
+            frame = self._read_frame(deadline, client_socket)
             if frame.get("id") == request_id:
                 if "error" in frame:
                     raise RuntimeError(f"DSH prompt failed: {frame['error']}")
@@ -394,11 +428,35 @@ class DshSdk:
             request_id = self._send("shutdown")
             self._wait_for_response(request_id, 30)
         except Exception:
-            self.process.terminate()
+            self.abort()
+            return
         try:
             self.process.wait(timeout=30)
         except subprocess.TimeoutExpired:
+            self.abort()
+
+    def abort(self) -> None:
+        """Stop the SDK and every subprocess in its dedicated process group."""
+        if self.process.poll() is not None:
+            return
+        try:
+            os.killpg(self.process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            self.process.terminate()
+        try:
+            self.process.wait(timeout=SDK_ABORT_TIMEOUT_SECONDS)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(self.process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        except PermissionError:
             self.process.kill()
+        self.process.wait(timeout=SDK_ABORT_TIMEOUT_SECONDS)
 
 
 def mode_instruction(mode: str) -> str:
@@ -552,8 +610,22 @@ class SessionDaemon:
                     self.sessions[key]["restarted"] = True
         self._recover_running_sessions()
         self._save_state()
-        self.sdk = DshSdk(cwd, self.state_root / f"{mode}-dsh.log")
+        self.sdk: DshSdk | None = DshSdk(cwd, self.state_root / f"{mode}-dsh.log")
         self._save_state()
+
+    def _ensure_sdk(self) -> DshSdk:
+        if self.sdk is None:
+            self.sdk = DshSdk(self.cwd, self.state_root / f"{self.mode}-dsh.log")
+        return self.sdk
+
+    def _discard_sdk(self) -> None:
+        sdk = self.sdk
+        self.sdk = None
+        if sdk is None:
+            return
+        abort = getattr(sdk, "abort", None)
+        if callable(abort):
+            abort()
 
     def _save_state(self) -> None:
         atomic_json(
@@ -672,20 +744,39 @@ class SessionDaemon:
 
     def _session(self, key: str) -> dict[str, Any]:
         current = self.sessions.get(key)
-        if current is None or "session_id" not in current:
+        live_session_lost = bool(current and current.get("live_session_lost"))
+        if current is None or "session_id" not in current or live_session_lost:
             current = {
                 "session_id": session_id(),
                 "turns": 0,
                 "context_tokens": 0,
                 "context_window": 0,
                 "created_at": int(time.time()),
-                "restarted": bool(current and current.get("restarted")),
+                "restarted": bool(current and (current.get("restarted") or live_session_lost)),
             }
             self.sessions[key] = current
         return current
 
-    def _rotate(self, key: str, current: dict[str, Any], timeout: int) -> tuple[dict[str, Any], str]:
-        summary = self.sdk.prompt(current["session_id"], handoff_prompt(), timeout)
+    def _prompt_sdk(
+        self,
+        identifier: str,
+        text: str,
+        timeout: int,
+        client_socket: socket.socket | None,
+    ) -> str:
+        sdk = self._ensure_sdk()
+        if client_socket is None:
+            return sdk.prompt(identifier, text, timeout)
+        return sdk.prompt(identifier, text, timeout, client_socket=client_socket)
+
+    def _rotate(
+        self,
+        key: str,
+        current: dict[str, Any],
+        timeout: int,
+        client_socket: socket.socket | None,
+    ) -> tuple[dict[str, Any], str]:
+        summary = self._prompt_sdk(current["session_id"], handoff_prompt(), timeout, client_socket)
         digest = hashlib.sha256(key.encode()).hexdigest()[:16]
         timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         path = self.handoff_root / f"{self.mode}-{digest}-{timestamp}.md"
@@ -704,7 +795,11 @@ class SessionDaemon:
         self._save_state()
         return replacement, summary
 
-    def handle(self, request: dict[str, Any]) -> dict[str, Any]:
+    def handle(
+        self,
+        request: dict[str, Any],
+        client_socket: socket.socket | None = None,
+    ) -> dict[str, Any]:
         if request.get("action") == "ping":
             return {"ok": True, "pid": os.getpid(), "cwd": str(self.cwd), "mode": self.mode}
         if request.get("action") == "shutdown":
@@ -721,6 +816,7 @@ class SessionDaemon:
             return {"ok": False, "error": f"session_key must be at most {SESSION_KEY_LIMIT} characters"}
         if not isinstance(prompt, str) or not prompt.strip():
             return {"ok": False, "error": "prompt must be a non-empty string"}
+        self._ensure_sdk()
         current = self._session(key)
         restarted = bool(current.pop("restarted", False))
         for stale in ("previous_session_id", "previous_status", "previous_active_turn", "recovered"):
@@ -739,7 +835,7 @@ class SessionDaemon:
         handoff = ""
         try:
             if rotate and int(current.get("turns", 0)) > 0:
-                current, handoff = self._rotate(key, current, timeout)
+                current, handoff = self._rotate(key, current, timeout, client_socket)
                 current["status"] = "running"
                 current["active_turn"] = 1
                 current["prompt_started_at"] = started_at
@@ -754,20 +850,30 @@ class SessionDaemon:
                 )
             else:
                 full_prompt = header + prompt
-            answer = self.sdk.prompt(current["session_id"], full_prompt, timeout)
-        except Exception:
+            answer = self._prompt_sdk(current["session_id"], full_prompt, timeout, client_socket)
+        except Exception as error:
             # Error state FIRST, then the terminal turn_failed event.
             current["status"] = "error"
             current["last_error_at"] = int(time.time())
             turn_on_failure = int(current.pop("active_turn", 0)) or int(current.get("turns", 0)) + 1
             self._save_state()
+            self._discard_sdk()
+            if isinstance(error, TimeoutError):
+                failure_reason = "sdk-timeout"
+            elif isinstance(error, ClientDisconnectedError):
+                failure_reason = "client-disconnected"
+            else:
+                failure_reason = "prompt-failed"
             self._emit_event(
                 current,
                 "turn_failed",
                 session_key=key,
                 turn=turn_on_failure,
-                reason="prompt-failed",
+                reason=failure_reason,
             )
+            current["live_session_lost"] = True
+            current["restarted"] = True
+            self._save_state()
             raise
         expected_turn = int(current.get("turns", 0)) + 1
         stats = wait_session_stats(current["session_id"], expected_turn)
@@ -860,17 +966,21 @@ class SessionDaemon:
                         payload += chunk
                     try:
                         request = json.loads(payload.decode())
-                        response = self.handle(request)
+                        response = self.handle(request, client_socket=connection)
                     except Exception as error:
                         response = {"ok": False, "error": str(error)}
-                    connection.sendall(json.dumps(response, ensure_ascii=False).encode() + b"\n")
+                    try:
+                        connection.sendall(json.dumps(response, ensure_ascii=False).encode() + b"\n")
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
         finally:
             server.close()
             try:
                 self.socket_path.unlink()
             except FileNotFoundError:
                 pass
-            self.sdk.close()
+            if self.sdk is not None:
+                self.sdk.close()
         return 0
 
 
