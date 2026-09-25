@@ -64,5 +64,25 @@ claimed. Port/token can change after runtime restart.
 
 ## Release state
 
-Source acceptance is complete. Commit/push, installation/provenance and an
-installed-launcher smoke test are recorded in the final release update below.
+Implementation commit `46b9cff` was pushed to `origin/main` and passed
+[GitHub Actions](https://github.com/jooxee/dsh-scout/actions/runs/36156116240).
+`scripts/install.sh --force` installed the update; all 14 installed files
+were byte-identical to the repository (skill, agent metadata, launchers and
+nine backend modules).
+
+Installed controller PID 3845998 ran
+`/home/alex/.codex/skills/dsh-scout/scripts/run_dsh_session.py` with exact cwd.
+Its child PID 3846060 served port 46029 using the scout-owned patch. The
+operator's original PID 1744504 still served 3080, unchanged.
+
+Two installed-launcher turns completed in session
+`session-dsh-scout-6754911b-1904-4f91-8e4c-ac2b1f91a034` (`write:52`, `write:54`).
+Before turn 2 the Chrome tab was already open on that session. It showed the
+new Running Bash, then LIVE_SECOND_COMPLETE and the idle composer, without
+navigation or reload. Normal launcher output contained no authentication
+token. User settings checksum still matched.
+
+The supervision monitor was deleted after the final terminal event. The
+installed writer runtime remains idle for inspection in Chrome; the reader
+and earlier test runtimes were stopped. This is a local skill installation,
+not a deployment. Owner acceptance remains a separate, unclaimed fact.

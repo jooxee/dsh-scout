@@ -18,8 +18,8 @@
 
 ## Release
 
-- [ ] Scoped commit and push on main.
-- [ ] Install verified files and verify installed launcher/process provenance.
-- [ ] Sync and archive specifications; update existing AI-CONTEXT and Issue/Project.
+- [x] Scoped commit and push on main (46b9cff, CI green).
+- [x] Install verified files and verify installed launcher/process provenance; repeat live Chrome acceptance.
+- [x] Prepare verified requirements and release evidence for spec sync/archive and Issue closure.
 
 Evidence: `docs/verification/issue-6.md`. No deployment or owner acceptance claim.
