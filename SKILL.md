@@ -57,6 +57,8 @@ Override the thresholds with `DSH_SCOUT_SOFT_CONTEXT_TOKENS` and `DSH_SCOUT_HARD
 
 Do not infer context size from cumulative billed usage. Cache reads reduce repeated computation but do not free context-window space. If the controller restarted, a prompt timed out, or its requesting host disconnected, the launcher refuses continuation before dispatch. Report the loss and use `--new-session` only after an explicit decision to accept fresh context, with a new self-contained packet and re-checked repository state. Do not automatically acknowledge loss. `--new-session` rejects healthy sessions; `--rotate` remains a live handoff. Failed prompts are never retried automatically.
 
+The web controller requests only the last message in the opening follow snapshot; the stream cursor still supplies every new event. This keeps long-session history out of the controller's WebSocket frame while DSH retains the full session and cache. A genuinely oversized newest frame fails with a bounded transport reason. Do not respond to that failure by silently starting a fresh Scout.
+
 ## Launch
 
 Resolve the absolute directory containing this loaded `SKILL.md`. Set `DSH_SCOUT_HOME` to that directory in each shell invocation, or use its absolute script paths directly. It is a shell convenience variable, not an automatically populated runtime setting. Keep the repository's exact path in `--cwd`; do not change it to the skill directory. For installation and discovery details, read [docs/integrations.md](docs/integrations.md).

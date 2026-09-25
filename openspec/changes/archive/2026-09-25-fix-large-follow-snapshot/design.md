@@ -1,0 +1,8 @@
+## Evidence
+The failed follow-up emitted `turn_started` then `turn_failed` within a second, before model work. `Follow._value` replaces the reader exception with a generic transport message. The saved prior session is 3,063,778 bytes decompressed. The installed client limits incoming frames to 1 MiB. DSH's documented `SessionFollowRequest.maxMessages` bounds the opening message-aligned tail; without it the server defaults to 50 messages. These facts make an oversized opening frame the leading cause. The regression test will exercise that exact failure shape rather than relying on this inference alone.
+
+## Decision
+Set `maxMessages: 1` on the follow request. The driver validates the snapshot header/cwd, ignores old history, and observes only events after the opening cursor; it does not need the default 50-message page. DSH supplies a complete cursor and all later durable events even with a small opening page. Keep the 1 MiB per-frame safety bound: raising it would move the failure threshold and increase queue memory for no useful history. A single unusually large latest message may still exceed the bound; report that bounded cause clearly and fail conservatively without dispatching or silently replacing the session.
+
+## Verification
+Use the existing loopback DSH fixture to simulate history whose default opening exceeds the reader bound, then verify two turns under one session ID and no runtime restart/fresh session. Include a direct oversized-frame diagnostic check and existing cancellation/ownership tests. No paid model calls are necessary. The real production follow-up after installing this change remains a separate acceptance check; a fake server cannot prove provider KV cache hit rate.

@@ -101,7 +101,7 @@ A prompt timeout MUST attempt cancellation through `session/cancel` and MUST the
 - **THEN** the turn fails with reason `prompt-failed`, a bounded scrubbed detail is recorded, the owned runtime is terminated before the terminal supervision event, and no fallback backend starts
 
 ### Requirement: Normal history and conservative restart
-Normal follow-up turns MUST reuse the owned live session and preserve its history, including after action_required. After failure, runtime death or controller restart, continuation MUST fail before backend dispatch until the operator explicitly supplies --new-session with a fresh delegation packet. Historical records MUST remain in DSH. --new-session MUST NOT replace a healthy live session, and --rotate MUST NOT bypass lost-context acknowledgement. Provider cache hit rate is not guaranteed.
+Normal follow-up turns MUST reuse the owned live session and preserve its history, including after action_required. The controller MUST open a bounded follow tail sufficient to establish the session cursor and observe the next turn without requiring the full prior transcript to fit in one WebSocket frame. After failure, runtime death or controller restart, continuation MUST fail before backend dispatch until the operator explicitly supplies --new-session with a fresh delegation packet. Historical records MUST remain in DSH. --new-session MUST NOT replace a healthy live session, and --rotate MUST NOT bypass lost-context acknowledgement. Provider cache hit rate is not guaranteed.
 
 #### Scenario: follow-up retains live history
 - **WHEN** a turn ends with action_required and a second prompt uses the same key and live owner
@@ -118,6 +118,14 @@ Normal follow-up turns MUST reuse the owned live session and preserve its histor
 #### Scenario: healthy context cannot be reset accidentally
 - **WHEN** --new-session targets a healthy live session
 - **THEN** the request is rejected and the session is preserved
+
+#### Scenario: A long completed session receives a follow-up
+- **WHEN** prior durable history is larger than the bounded WebSocket frame but the last message fits
+- **THEN** the controller opens a small history tail, retains the same session identity, receives the new turn's durable events and completes without requiring a fresh session
+
+#### Scenario: The most recent frame itself exceeds the bound
+- **WHEN** even the bounded opening frame exceeds the reader's safety limit
+- **THEN** the follow-up fails with a bounded cause naming the frame limit, and the controller does not silently create a new session or dispatch a prompt
 
 ### Requirement: Verified child lifecycle
 The controller MUST record runtime identity immediately after spawning it and before URL discovery. Stale-child reaping MUST verify the mode-scoped marker, UID, exact patch argument, process group, and Linux process start ticks. Startup and shutdown MUST be bounded, and an ownership record MUST clear only after confirmed exit. The launcher and daemon MUST hold per-mode OS locks for their lifetimes; direct concurrent prompt requests MUST be rejected.

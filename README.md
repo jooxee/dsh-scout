@@ -184,7 +184,7 @@ The blocking launcher remains compatible and additionally prints the emitted lif
 
 On the web backend, cancellation success requires a confirmed `turn/end` (or proven idle with no writer ever possible). When cancel is rejected, the confirmation window expires, the transport breaks, or ownership is ambiguous, the owned runtime process group is terminated BEFORE the terminal `turn_failed` event is appended and a fresh runtime/session requires an explicit `--new-session` acknowledgement — a possibly-active writer is never kept after a reported failure. Persisted sessions are reused only when both ownership and terminal state are proven.
 
-The detailed contract lives in [`docs/specifications/supervision-events.md`](docs/specifications/supervision-events.md).
+The detailed contract lives in [`docs/specifications/supervision-events.md`](docs/specifications/supervision-events.md). The web follow request opens with one message of history, enough to establish the session cursor and verify its cwd; later events arrive on the same stream. This avoids resending the default 50-message history page to the controller on every follow-up while the DSH session and provider cache stay live. The WebSocket frame safety limit remains 1 MiB, and a single oversized newest frame fails explicitly instead of causing an automatic new session.
 
 ## Verification handoff
 

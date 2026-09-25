@@ -40,7 +40,10 @@ class Follow:
                     "payload": {
                         "args": {
                             "request": {
-                                "address": {"kind": "session", "sessionId": session_id}
+                                "address": {"kind": "session", "sessionId": session_id},
+                                # The driver only needs the opening cursor/cwd;
+                                # DSH otherwise sends 50 messages of history.
+                                "maxMessages": 1,
                             }
                         }
                     },
@@ -85,6 +88,10 @@ class Follow:
 
     def _value(self, item: Any) -> dict:
         if isinstance(item, Exception):
+            if isinstance(item, TransportError):
+                # Reader errors are locally generated bounded diagnostics,
+                # never transcript content or authenticated URLs.
+                raise TransportError(f"follow reader failed: {item}") from item
             raise TransportError("follow reader failed") from item
         if not isinstance(item, dict) or item.get("streamId") != self.stream_id:
             raise ProtocolError("invalid follow stream identity")
