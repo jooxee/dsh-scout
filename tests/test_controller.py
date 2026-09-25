@@ -75,6 +75,7 @@ class ControllerTests(unittest.TestCase):
             daemon.handoff_root = root / "handoffs"
             daemon.stopping = False
             daemon.sessions = {}
+            daemon.events = controller.SupervisionEvents(root / "events" / "write.events.jsonl", "write")
 
             class FakeSdk:
                 def prompt(self, identifier, text, timeout):
@@ -111,6 +112,11 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(saved["turns"], 1)
             self.assertNotIn("active_turn", saved)
             self.assertEqual(response["text"], "finished")
+            self.assertEqual(response["event"]["kind"], "turn_completed")
+            self.assertEqual(response["action_required"], None)
+            saved = controller.read_json(state_path)["sessions"]["repo:issue-2:writer"]
+            self.assertEqual(saved["last_event"]["event_id"], response["event"]["event_id"])
+            self.assertEqual(saved["last_event"]["kind"], "turn_completed")
 
 
 if __name__ == "__main__":

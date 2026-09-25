@@ -111,6 +111,7 @@ def make_daemon(state_path: Path, root: Path):
     daemon.handoff_root = root / "handoffs"
     daemon.stopping = False
     daemon.sessions = {}
+    daemon.events = controller.SupervisionEvents(root / "events" / "write.events.jsonl", "write")
 
     class FakeSdk:
         def prompt(self, identifier, text, timeout):
