@@ -48,6 +48,7 @@ class InstallTests(unittest.TestCase):
         payload = [ROOT / "SKILL.md", ROOT / "agents/openai.yaml", ROOT / "LICENSE"]
         payload += [ROOT / "scripts" / name for name in (
             "run-dsh-agent.sh", "run_dsh_session.py", "watch_dsh_events.py",
+            "scout_status.py",
         )]
         payload += list((ROOT / "scripts/dsh_web").glob("*.py"))
         payload += list((ROOT / "docs/specifications").glob("*.md"))
@@ -55,7 +56,7 @@ class InstallTests(unittest.TestCase):
         for source in payload:
             target = destination / source.relative_to(ROOT)
             self.assertEqual(source.read_bytes(), target.read_bytes(), str(target))
-        for name in ("run-dsh-agent.sh", "watch_dsh_events.py"):
+        for name in ("run-dsh-agent.sh", "watch_dsh_events.py", "scout_status.py"):
             executable = destination / "scripts" / name
             self.assertTrue(os.access(executable, os.X_OK))
             result = self.run_command(executable, "--help")

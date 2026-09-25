@@ -75,13 +75,21 @@ Use the same approved provider/model environment on every follow-up and UI comma
 
 For the optional second scout, use `--mode read` and a key ending in `:reader`. The reader can run beside the writer; otherwise wait for one request to finish before starting another. Use `--timeout-seconds N` only when the default one-hour bound is unsuitable. Use `--rotate` only at a coherent boundary because it creates a handoff turn.
 
-The default backend is a scout-owned ordinary DSH web runtime. Immediately after dispatch, retrieve its authenticated URL with the same mode/cwd/provider/model and `--show-ui-url` (omit session-key and prompt-file). It works during a running turn. Open that URL for live progress and keep the same tab across turns. The normal prompt response prints only the token-free origin. Do not copy the authenticated URL into Issues, logs, or handoffs. A separate user-started DSH, such as port 3080, does not receive live events from this process.
+The default backend is a scout-owned ordinary DSH web runtime. For routine supervision use the compact status and terminal event watcher below. Retrieve its authenticated URL with the same mode/cwd/provider/model and `--show-ui-url` (omit session-key and prompt-file) when a failure, action request, or verification needs the full live record. It works during a running turn. Keep the same tab across turns. The normal prompt response prints only the token-free origin. Do not copy the authenticated URL into Issues, logs, or handoffs. A separate user-started DSH, such as port 3080, does not receive live events from this process.
 
 `DSH_SCOUT_BACKEND=sdk` explicitly selects the legacy SDK backend, which has no live scout UI. Never silently switch backends after failure. On any failed turn the controller stops its owned runtime before publishing failure; the next turn requires explicit `--new-session` acknowledgement and a complete packet. Historical sessions remain in DSH, but active context is not restored after a failure or controller restart. Never activate an active scout session in a second DSH host.
 
 If the command yields a running session, supervise it with durable supervision events, not by asking the user to relay status. The next section is mandatory on every delegation.
 
 ## Supervise with durable events
+
+For an interim status request or after reconnecting, read one exact session without opening DSH:
+
+```bash
+"${DSH_SCOUT_HOME}/scripts/scout_status.py" --mode read --session-key repo:issue-123:reader
+```
+
+The one-line JSON reports phase, process liveness, active flag, turn, and event sequence. `running` means a turn is recorded and the expected controller/runtime processes match; it does not prove model progress. Add `--details` only when these fields cannot answer the question. The status command does not start a daemon, send a prompt, or consume provider tokens. Prefer one terminal-event wait over repeated snapshots; open the DSH UI only for a concrete diagnostic or verification need.
 
 Every delegated DSH turn emits an append-only, user-private lifecycle event stream at `${CODEX_HOME:-$HOME/.codex}/state/dsh-scout/events/<mode>.events.jsonl`. All harnesses must use the same `HOME` and `CODEX_HOME` (canonical state identity). Default sockets are derived from that identity and no longer depend on `XDG_RUNTIME_DIR`; request and owner locks live beside the state file, including for custom sockets. Keep default paths. A still-running legacy controller blocks migration: settle its turn and deliberately stop it before upgrading; never launch another owner to bypass this refusal. The legacy Codex directory names are compatibility paths and require no Codex process. Each record is a bounded JSON object with `kind` (`turn_started`, `turn_completed`, `turn_failed`, or terminal `action_required`), `sequence`, `event_id`, `mode`, `session_key`, `session_id`, `turn`, `emitted_at`, and, for terminal events, `verification_state: "pending"`. Prompts, responses, file contents, and secrets are never part of lifecycle events.
 
