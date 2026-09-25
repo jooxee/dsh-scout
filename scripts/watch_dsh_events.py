@@ -25,6 +25,7 @@ CURSOR_DEFAULT = 0
 POLL_INTERVAL_SECONDS = 0.2
 TIMEOUT_EXIT = 42
 TERMINAL_EVENT_KINDS = frozenset({"action_required", "turn_completed", "turn_failed"})
+SESSION_KEY_LIMIT = 200
 
 
 def default_state_root() -> Path:
@@ -125,6 +126,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--timeout-seconds must be positive")
     if not args.session_key.strip():
         parser.error("--session-key must be a non-empty string")
+    if len(args.session_key) > SESSION_KEY_LIMIT:
+        # Rejected, never clipped: subscribers need exact session identity.
+        parser.error(f"--session-key must be at most {SESSION_KEY_LIMIT} characters")
     return args
 
 

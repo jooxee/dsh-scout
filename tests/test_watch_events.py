@@ -145,6 +145,29 @@ class WatcherIntegrationTests(unittest.TestCase):
             )
         self.assertEqual(completed.returncode, watcher.TIMEOUT_EXIT)
 
+    def test_oversized_session_key_is_rejected_not_clipped(self) -> None:
+        max_key = "r:" + "a" * (watcher.SESSION_KEY_LIMIT - 2)
+        over_key = max_key + "b"
+        self.assertEqual(len(over_key), watcher.SESSION_KEY_LIMIT + 1)
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = self.run_watcher(Path(temporary), "--mode", "write", "--session-key", over_key)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertNotEqual(completed.returncode, watcher.TIMEOUT_EXIT)
+        self.assertEqual(completed.stdout, "")
+        self.assertIn("at most 200", completed.stderr)
+
+    def test_session_key_at_limit_is_watched(self) -> None:
+        max_key = "r:" + "a" * (watcher.SESSION_KEY_LIMIT - 2)
+        self.assertEqual(len(max_key), watcher.SESSION_KEY_LIMIT)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            seats(root, [sample(1, key=max_key)])
+            completed = self.run_watcher(
+                root, "--mode", "write", "--session-key", max_key, "--timeout-seconds", "2"
+            )
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(json.loads(completed.stdout.strip())["session_key"], max_key)
+
 
 if __name__ == "__main__":
     unittest.main()

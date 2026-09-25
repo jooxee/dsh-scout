@@ -36,6 +36,7 @@ ACTION_QUESTION_LIMIT = 500
 ACTION_QUESTIONS_LIMIT = 3
 TERMINAL_EVENT_KINDS = {"action_required", "turn_completed", "turn_failed"}
 SUPERVISION_ERROR_LIMIT = 200
+SESSION_KEY_LIMIT = 200
 ACTION_PATTERN = re.compile(
     rf"{re.escape(ACTION_OPEN)}\s*\n(.*?)\n{re.escape(ACTION_CLOSE)}\s*$",
     re.DOTALL,
@@ -156,24 +157,42 @@ class SupervisionEvents:
         self.mode = mode
         self.sequence = self._last_sequence()
 
-    def _last_sequence(self) -> int:
+    def records(self) -> list[dict[str, Any]]:
+        """All durably valid JSON event records in the stream, in order."""
         try:
             lines = self.path.read_text().splitlines()
-        except FileNotFoundError:
-            return 0
-        except OSError:
-            return 0
-        greatest = 0
+        except (FileNotFoundError, OSError):
+            return []
+        events: list[dict[str, Any]] = []
         for line in lines:
             try:
                 value = json.loads(line)
             except json.JSONDecodeError:
-                # A truncated or partially written final record is ignored
-                # until the writer finishes it; earlier valid records remain.
+                # A truncated or partially written record is ignored until
+                # the writer completes it; earlier valid records remain.
                 continue
-            if isinstance(value, dict) and isinstance(value.get("sequence"), int):
+            if isinstance(value, dict):
+                events.append(value)
+        return events
+
+    def _last_sequence(self) -> int:
+        greatest = 0
+        for value in self.records():
+            if isinstance(value.get("sequence"), int):
                 greatest = max(greatest, value["sequence"])
         return max(0, greatest)
+
+    def recovery_keys(self) -> set[str]:
+        """Session keys with a durable controller-restart recovery failure."""
+        keys: set[str] = set()
+        for event in self.records():
+            if (
+                event.get("kind") == "turn_failed"
+                and event.get("reason") == RECOVERY_REASON
+                and isinstance(event.get("session_key"), str)
+            ):
+                keys.add(event["session_key"])
+        return keys
 
     def append(
         self,
@@ -397,7 +416,9 @@ def supervision_instruction() -> str:
         "Rules: this is a terminal handoff, not live dialogue; it is NOT authorization "
         "and does not grant permission. It must appear only at the very end of your "
         "final message. If you can proceed without it, do not emit it. Envelopes that "
-        "are malformed, oversized, or not terminal are treated as ordinary output."
+        "are malformed, structured in more than one envelope, or not terminal are "
+        "treated as ordinary output; if an envelope is valid but its text is longer "
+        "than the documented bounds, the controller stores only the clipped prefix."
     )
 
 
@@ -562,8 +583,17 @@ class SessionDaemon:
         return record
 
     def _recover_running_sessions(self) -> None:
-        """Emit one recovery failure for every session left running last time."""
+        """Emit one recovery failure for every session left running last time.
+
+        Deduplication is durable: the event stream itself carries controller-
+        derived evidence of an earlier recovery for the same session key, so a
+        crash between event append and state persistence cannot duplicate it.
+        """
+        recovered_keys = self.events.recovery_keys()
         for key, record in self.sessions.items():
+            if key in recovered_keys:
+                record["recovered"] = True
+                continue
             if not self._needs_recovery(record):
                 continue
             self.events.append(
@@ -669,6 +699,8 @@ class SessionDaemon:
         timeout = int(request.get("timeout", DEFAULT_TIMEOUT))
         if not isinstance(key, str) or not key.strip():
             return {"ok": False, "error": "session_key must be a non-empty string"}
+        if len(key) > SESSION_KEY_LIMIT:
+            return {"ok": False, "error": f"session_key must be at most {SESSION_KEY_LIMIT} characters"}
         if not isinstance(prompt, str) or not prompt.strip():
             return {"ok": False, "error": "prompt must be a non-empty string"}
         current = self._session(key)
@@ -740,7 +772,9 @@ class SessionDaemon:
         # Idle state, verification facts, and post facts are persisted BEFORE
         # the terminal action_required or turn_completed event.
         self._save_state()
-        _stripped_text, action = parse_action_required(answer)
+        # For a valid terminal envelope the control block is returned only
+        # inside the supervision event, never in the ordinary output text.
+        final_text, action = parse_action_required(answer)
         if action is not None:
             event = self._emit_event(
                 current,
@@ -759,7 +793,7 @@ class SessionDaemon:
         context_tokens = int(current.get("context_tokens", 0))
         return {
             "ok": True,
-            "text": answer,
+            "text": answer if action is None else final_text,
             "session_key": key,
             "session_id": current["session_id"],
             "turns": current["turns"],

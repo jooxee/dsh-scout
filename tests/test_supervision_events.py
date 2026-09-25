@@ -186,6 +186,37 @@ class HandleEventOrderTests(unittest.TestCase):
         self.assertEqual(response["action_required"]["trust"], "scout-declared")
         self.assertEqual(response["last_event"]["kind"], "action_required")
 
+    def test_valid_envelope_stays_out_of_returned_text(self) -> None:
+        answer = (
+            "Code changes are done.\n"
+            f"{controller.ACTION_OPEN}\n"
+            '{"summary":"Blocked","questions":["Proceed?"]}\n'
+            f"{controller.ACTION_CLOSE}"
+        )
+        root, daemon = self.make_daemon_with_spy_sdk(answer)
+        response = run_prompt(daemon)
+        # The exact cleaned text: everything before the envelope's own line.
+        self.assertEqual(response["text"], "Code changes are done.")
+        self.assertNotIn(controller.ACTION_OPEN, json.dumps(response["text"]))
+        events = read_events(root / EVENTS_FILE)
+        record = next(e for e in events if e["kind"] == "action_required")
+        self.assertEqual(record["action"]["summary"], "Blocked")
+
+    def test_nonterminal_envelope_text_is_returned_verbatim(self) -> None:
+        answer = (
+            "Answer.\n"
+            f"{controller.ACTION_OPEN}\n"
+            '{"summary":"no","questions":["keep"]}\n'
+            f"{controller.ACTION_CLOSE}\n"
+            "more normal text"
+        )
+        root, daemon = self.make_daemon_with_spy_sdk(answer)
+        response = run_prompt(daemon)
+        self.assertEqual(response["text"], answer)
+        self.assertIsNone(response["action_required"])
+        self.assertEqual(response["event"]["kind"], "turn_completed")
+
+
     def test_turn_failed_event_after_error_state(self) -> None:
         root, daemon = self.make_daemon_with_spy_sdk(RuntimeError("DSH prompt failed: boom"))
         with self.assertRaises(RuntimeError), mock.patch.object(
@@ -226,6 +257,46 @@ class HandleEventOrderTests(unittest.TestCase):
         self.assertLessEqual(len(state["last_error"]), controller.SUPERVISION_ERROR_LIMIT)
         self.assertEqual(read_events(root / EVENTS_FILE), [])
 
+
+class SessionKeyBoundaryTests(unittest.TestCase):
+    def test_session_key_limit_enforced_not_clipped(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            daemon = make_daemon(root, None)
+
+            class NeverSdk:
+                def prompt(self, identifier, text, timeout):  # pragma: no cover
+                    raise AssertionError("no prompt may run for an invalid key")
+
+            daemon.sdk = NeverSdk()
+            max_key = "r:" + "a" * (controller.SESSION_KEY_LIMIT - 2)
+            self.assertEqual(len(max_key), controller.SESSION_KEY_LIMIT)
+            over_key = max_key + "b"
+            self.assertEqual(len(over_key), controller.SESSION_KEY_LIMIT + 1)
+            rejected = daemon.handle({"action": "prompt", "session_key": over_key, "prompt": "work"})
+            self.assertFalse(rejected["ok"])
+            self.assertIn("at most 200", rejected["error"])
+            self.assertNotIn(over_key, (root / EVENTS_FILE).read_text() if (root / EVENTS_FILE).exists() else "")
+
+    def test_session_key_at_limit_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            daemon = make_daemon(root, None)
+
+            class TextSdk:
+                def prompt(self, identifier, text, timeout):
+                    return "done"
+
+            daemon.sdk = TextSdk()
+            max_key = "r:" + "a" * (controller.SESSION_KEY_LIMIT - 2)
+            with mock.patch.object(controller, "repository_facts", return_value={"available": False}), mock.patch.object(
+                controller, "wait_session_stats", return_value={"context_tokens": 10, "context_window": 1000}
+            ):
+                response = daemon.handle({"action": "prompt", "session_key": max_key, "prompt": "work", "timeout": 30})
+            self.assertTrue(response["ok"])
+            events = read_events(root / EVENTS_FILE)
+            for event in events:
+                self.assertEqual(event["session_key"], max_key)
 
 class ParseActionRequiredTests(unittest.TestCase):
     def envelope(self, body: str, prefix: str = "Working on it.") -> str:
@@ -346,6 +417,52 @@ class RestartRecoveryTests(unittest.TestCase):
             self.assertEqual(response["event"]["event_id"], "write:3")
             kinds = [e["kind"] for e in read_events(root / EVENTS_FILE)]
             self.assertEqual(kinds, ["turn_failed", "turn_started", "turn_completed"])
+
+    def test_stream_evidence_prevents_duplicate_recovery_after_crash(self) -> None:
+        # Simulate the crash window: the recovery record was appended, but the
+        # controller died before persisting `recovered` in the state file.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state_path = root / "write.json"
+            events_path = root / EVENTS_FILE
+            controller.atomic_json(
+                state_path,
+                {"version": 1, "sessions": {SESSION_KEY: {"session_id": "s-old", "status": "running", "active_turn": 2}}},
+            )
+            stream = controller.SupervisionEvents(events_path, "write")
+            stream.append(
+                kind="turn_failed",
+                session_key=SESSION_KEY,
+                session_id_value="s-old",
+                turn=2,
+                reason="controller-restart-recovery",
+            )
+            daemon = self.make_restarted_daemon(state_path, root)
+            events = read_events(events_path)
+            recoveries = [
+                e for e in events
+                if e["kind"] == "turn_failed" and e.get("reason") == "controller-restart-recovery"
+            ]
+            self.assertEqual(len(recoveries), 1)
+            self.assertEqual(recoveries[0]["session_key"], SESSION_KEY)
+            self.assertTrue(daemon.sessions[SESSION_KEY]["recovered"])
+            # The sequence continues above the surviving recovery record.
+            class TextSdk:
+                def prompt(self, identifier, text, timeout):
+                    return "ok"
+
+            daemon.sdk = TextSdk()
+            with mock.patch.object(controller, "repository_facts", return_value={"available": False}), mock.patch.object(
+                controller, "wait_session_stats", return_value={"context_tokens": 10, "context_window": 1000}
+            ):
+                response = daemon.handle(
+                    {"action": "prompt", "session_key": "repo:issue-7:writer", "prompt": "work", "timeout": 30}
+                )
+            self.assertEqual(response["event"]["sequence"], 3)
+            self.assertEqual(response["event"]["event_id"], "write:3")
+            events = read_events(events_path)
+            self.assertEqual([e["kind"] for e in events], ["turn_failed", "turn_started", "turn_completed"])
+            self.assertEqual([e["sequence"] for e in events], [1, 2, 3])
 
     def test_second_restart_does_not_duplicate_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -115,7 +115,7 @@ Subscribe with the standalone watcher:
 
 `--after-sequence` is an exclusive cursor; `--terminal-only` restricts events to terminal kinds; `--state-root` overrides the controller state root for tests. The watcher waits for the first matching event, prints exactly one JSON object to stdout, and exits 0. Timeout exits with code 42 and no stdout. A corrupt or truncated final JSONL record is ignored until the writer completes it; earlier valid events stay readable. Delivery is at-least-once: persist the greatest processed sequence and deduplicate by `event_id`. Events never contain prompt or response bodies, file contents, or secrets.
 
-The blocking launcher remains compatible and additionally prints the emitted lifecycle event (`event=... kind=... sequence=...`) to stderr so existing callers see the terminal outcome.
+The blocking launcher remains compatible and additionally prints the emitted lifecycle event (`event=... kind=... sequence=...`) to stderr so existing callers see the terminal outcome. When an action envelope is valid and terminal, the control block is delivered only inside the supervision event; the launcher prints the cleaned assistant text, with oversized valid values clipped to their documented bounds. Malformed or non-terminal envelopes remain ordinary stdout verbatim. Session keys are bounded to at most 200 characters and rejected, never clipped, at prompt input and in the watcher.
 
 The detailed contract lives in [`docs/specifications/supervision-events.md`](docs/specifications/supervision-events.md).
 

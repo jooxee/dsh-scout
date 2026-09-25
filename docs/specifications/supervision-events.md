@@ -153,7 +153,10 @@ diff, tests and external records.
   greatest valid record.
 - If the controller died while a session was recorded as running, startup
   emits one `turn_failed` recovery event identifying controller restart; it
-  does not claim DSH completion.
+  does not claim DSH completion. Recovery emission is deduplicated durably:
+  an existing recovery record for the same session key in the stream is
+  controller-derived evidence that recovery already happened, so a crash
+  between append and state persistence cannot emit a duplicate.
 - Event append failure must not be hidden. The prompt request fails and the
   state records a bounded supervision error because silent completion would
   recreate the original problem.
@@ -167,7 +170,9 @@ diff, tests and external records.
 - Bound every copied string and list before persistence or display.
 - Do not store prompt or response bodies in lifecycle events.
 - Resolve event paths below the controller-owned state directory; session keys
-  are data fields, not path components.
+  are data fields, not path components. A session key is bounded to at most
+  200 characters and rejected, never clipped, at prompt input and in the
+  watcher CLI, because cursors and subscribers need exact session identity.
 - Read-only scouts remain inside their existing outer filesystem sandbox.
 
 ## Verification

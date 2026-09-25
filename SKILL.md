@@ -37,7 +37,7 @@ Follow-up prompts under the same session key may be short and refer to the retai
 
 ## Reuse and rotate sessions
 
-Choose a stable, human-readable session key for one coherent unit of work, normally `<repo>:issue-<n>:writer` or `<repo>:openspec-<change>:writer`. Keep using that key while the objective and authoritative artifacts remain the same. Start a new key when the Issue/OpenSpec/PR, repository, role, or objective changes materially.
+Choose a stable, human-readable session key for one coherent unit of work, normally `<repo>:issue-<n>:writer` or `<repo>:openspec-<change>:writer`. Keep using that key while the objective and authoritative artifacts remain the same. Start a new key when the Issue/OpenSpec/PR, repository, role, or objective changes materially. Session keys are bounded to at most 200 characters; oversized keys are rejected, never clipped, so supervision cursors keep exact identity.
 
 The launcher records exact DSH context pressure from the session store:
 
@@ -91,7 +91,7 @@ It waits for the first event matching mode, session key, and an exclusive sequen
 
 ### Terminal action_required handoff
 
-The launcher prepends a supervision protocol so the scout stops its turn when it is blocked on missing information, authority, or a material product choice. When the final message ends with exactly one bounded envelope, the controller appends a terminal `action_required` event carrying only a bounded summary and questions labeled `trust: "scout-declared"`. This is a terminal handoff, not live dialogue inside a turn, and it is NEVER authorization: it may wake the orchestrator but grants no permission, selects no answer, and proves no repository fact. Malformed, oversized, or non-terminal envelopes are ordinary model text. Answer with a normal follow-up prompt under the same session key.
+The launcher prepends a supervision protocol so the scout stops its turn when it is blocked on missing information, authority, or a material product choice. When the final message ends with exactly one bounded envelope, the controller appends a terminal `action_required` event carrying only a bounded summary and questions labeled `trust: "scout-declared"`. This is a terminal handoff, not live dialogue inside a turn, and it is NEVER authorization: it may wake the orchestrator but grants no permission, selects no answer, and proves no repository fact. Malformed or non-terminal envelopes are ordinary model text; valid envelopes with oversized values are clipped to the documented bounds. Answer with a normal follow-up prompt under the same session key.
 
 ## Verify the result
 
