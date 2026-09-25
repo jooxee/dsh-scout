@@ -65,10 +65,37 @@ Reuse the same session key for follow-up turns under the same Issue, OpenSpec ch
 
 The optional reader uses the same command with `--mode read` and a key such as `project:issue-123:reader`.
 
+### Surfacing the scout UI URL
+
+On the default web backend, the prompt response includes the token-free UI
+origin. Before or during the turn, fetch the authenticated launch URL with
+`--show-ui-url` using the same mode, cwd, provider and model:
+
+```bash
+"${CODEX_HOME:-$HOME/.codex}/skills/dsh-scout/scripts/run-dsh-agent.sh" \
+  --mode write --cwd /absolute/path/to/project --show-ui-url
+```
+
+Only `--show-ui-url` prints the authenticated launch URL. Normal turn output
+prints the token-free origin. Keep authenticated URLs out of saved logs and
+GitHub handoffs; state and supervision events contain no launch token.
+
+### Live UI visibility — limits
+
+The scout runtime streams its own turn's events to any browser tab connected to
+its URL (tool activity, assistant text, completion). The same browser tab may
+also have been opened before the first turn. Process-local delivery means a
+foreign already-running DSH host (e.g. the operator's `127.0.0.1:3080`) shows
+no live scout turn; the documentation directs the operator to the scout
+runtime's URL instead. Do not activate an active scout session from a foreign host; DSH
+uses a session lease to reject a second owner, and this skill never attempts it.
+
 ## Configuration
 
 | Variable | Default | Purpose |
 |---|---:|---|
+| `DSH_SCOUT_BACKEND` | `web` | `web` (scout-owned `dsh web` runtime, live UI) or `sdk` (legacy detached SDK, explicit opt-in) |
+| `DSH_SCOUT_WEB_PORT` | ephemeral | Bind port for the scout web runtime; loopback host is fixed |
 | `DSH_SCOUT_PROVIDER` | `opencode-go` | DSH provider route |
 | `DSH_SCOUT_MODEL` | `glm-5.3-flash` | Model ID |
 | `DSH_SCOUT_SOFT_CONTEXT_TOKENS` | `250000` | Warn and rotate at a coherent boundary |
@@ -77,17 +104,19 @@ The optional reader uses the same command with `--mode read` and a key such as `
 | `CODEX_HOME` | `~/.codex` | Skill installation and controller state root |
 | `DSH_HOME` | `~/.dsh` | DSH configuration and session store |
 
-The soft context threshold must be below the hard threshold.
+The soft context threshold must be below the hard threshold. `DSH_SCOUT_BACKEND` accepts only `web` or `sdk`; any other value is rejected before any process is started.
 
 ## How persistence works
 
-The current DSH SDK creates sessions but cannot reopen an existing persisted session after its SDK process exits. The launcher therefore keeps one detached SDK controller alive for each mode and sends later prompts over a user-only Unix socket.
+The default execution backend is a scout-managed ordinary `dsh web` runtime per mode (Issue #6): the controller boots one `dsh web` process with loopback host, ephemeral port, and `--no-open`, and drives turns over its supported Remote API (`workspace/create`, `session/create`, `session/rename`, `session/prompt`, `session/cancel`) plus the `/api/remote.mux` follow stream. Because execution and UI events live in the same owner process, an already-open browser tab on the scout runtime shows live tool/assistant streaming and completion without reload.
+
+The legacy DSH SDK backend (`DSH_SCOUT_BACKEND=sdk`) remains available as an explicit opt-in for callers that prefer the older detached-SDK model; there is no hidden fallback in either direction — a startup failure fails the daemon or turn explicitly.
 
 Within a live session, the request history remains append-only, which preserves the provider's reusable KV-cache prefix. Cache reuse reduces repeated computation; it does not reduce context-window occupancy. Context thresholds use DSH's persisted `contextPressure.pressureTokens`, not cumulative billed usage.
 
-If the controller exits or the machine restarts, the next call starts a fresh live session and reports the loss of retained history. A prompt timeout or requesting launcher disconnect also terminates the DSH SDK process group: the controller emits a specific failed-turn event, stays available, and lazily starts a fresh SDK and live session on the next prompt. Failed prompts are never retried automatically. In every case, the next delegation packet must re-establish authoritative state.
+If the controller exits or the machine restarts, the next call starts a fresh live session and reports the loss of live context; historical sessions remain in DSH. A prompt timeout or requesting launcher disconnect also terminates the owned backend process group: the controller emits a specific failed-turn event, stays available, and lazily starts a fresh runtime and live session on the next prompt. Failed prompts are never retried automatically. In every case, the next delegation packet must re-establish authoritative state.
 
-The controller state file records the session ID, `status: running`, active turn, and start time before it dispatches a prompt. This makes a long first turn distinguishable from a stalled or missing controller even before the model returns its final response.
+The controller state file records the session ID, `status: running`, active turn, and start time before it dispatches a prompt. This makes a long first turn distinguishable from a stalled or missing controller even before the model returns its final response. On the web backend the state also records the runtime origin/pid/generation — never the launch token.
 
 On controller restart, any session persisted with `status: running` emits exactly one recovery `turn_failed` supervision event identifying the restart; it never claims a DSH result. The event stream sequence continues above the greatest valid prior record.
 
@@ -115,7 +144,9 @@ Subscribe with the standalone watcher:
 
 `--after-sequence` is an exclusive cursor; `--terminal-only` restricts events to terminal kinds; `--state-root` overrides the controller state root for tests. The timeout is bounded to at most 86,400 seconds (one day); non-finite, non-positive, or above-maximum values are rejected before waiting. The watcher waits for the first matching event, prints exactly one JSON object to stdout, and exits 0. Timeout exits with code 42 and no stdout. A corrupt or truncated final JSONL record is ignored until the writer completes it; earlier valid events stay readable. Delivery is at-least-once: persist the greatest processed sequence and deduplicate by `event_id`. Events never contain prompt or response bodies, file contents, or secrets.
 
-The blocking launcher remains compatible and additionally prints the emitted lifecycle event (`event=... kind=... sequence=...`) to stderr so existing callers see the terminal outcome. While the prompt runs, the controller watches the launcher's Unix socket; closing the launcher cancels the active turn and prevents an orphaned writer. Prompt timeouts use failure reason `sdk-timeout`, launcher disconnects use `client-disconnected`, and other prompt failures use `prompt-failed`. When an action envelope is valid and terminal, the control block is delivered only inside the supervision event; the launcher prints the cleaned assistant text, with oversized valid values clipped to their documented bounds. Malformed or non-terminal envelopes remain ordinary stdout verbatim. Session keys are bounded to at most 200 characters and rejected, never clipped, at prompt input and in the watcher.
+The blocking launcher remains compatible and additionally prints the emitted lifecycle event (`event=... kind=... sequence=...`) to stderr so existing callers see the terminal outcome. While the prompt runs, the controller watches the launcher's Unix socket; closing the launcher cancels the active turn and prevents an orphaned writer. Prompt timeouts use failure reason `sdk-timeout` (SDK backend) or `web-timeout` (web backend), launcher disconnects use `client-disconnected`, and other prompt failures use `prompt-failed`. When an action envelope is valid and terminal, the control block is delivered only inside the supervision event; the launcher prints the cleaned assistant text, with oversized valid values clipped to their documented bounds. Malformed or non-terminal envelopes remain ordinary stdout verbatim. Session keys are bounded to at most 200 characters and rejected, never clipped, at prompt input and in the watcher.
+
+On the web backend, cancellation success requires a confirmed `turn/end` (or proven idle with no writer ever possible). When cancel is rejected, the confirmation window expires, the transport breaks, or ownership is ambiguous, the owned runtime process group is terminated BEFORE the terminal `turn_failed` event is appended and a fresh runtime/session starts on the next prompt — a possibly-active writer is never kept after a reported failure. Persisted sessions are reused only when both ownership and terminal state are proven.
 
 The detailed contract lives in [`docs/specifications/supervision-events.md`](docs/specifications/supervision-events.md).
 
@@ -146,7 +177,7 @@ Only one request per mode can run at once. File locks permit one writer and one 
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile scripts/run_dsh_session.py scripts/watch_dsh_events.py
+python3 -m py_compile scripts/run_dsh_session.py scripts/watch_dsh_events.py scripts/dsh_web/*.py
 bash -n scripts/run-dsh-agent.sh scripts/install.sh
 ```
 

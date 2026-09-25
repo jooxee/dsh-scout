@@ -37,6 +37,7 @@ class ControllerTests(unittest.TestCase):
                 cwd=cwd,
                 socket=root / "reader.sock",
                 state_file=root / "reader.json",
+                backend="web",
             )
             with (
                 mock.patch.object(controller.shutil, "which", return_value="/usr/bin/bwrap"),
@@ -57,6 +58,7 @@ class ControllerTests(unittest.TestCase):
                 cwd=root,
                 socket=root / "writer.sock",
                 state_file=root / "writer.json",
+                backend="web",
             )
             command = controller.daemon_command(args, MODULE_PATH)
             self.assertEqual(command[0], os.sys.executable)

@@ -15,9 +15,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: YAML parser for isolated tests
+        run: |
+          npm install --prefix "$RUNNER_TEMP/dsh-test-deps" js-yaml@4.1.0
+          echo "NODE_PATH=$RUNNER_TEMP/dsh-test-deps/node_modules" >> "$GITHUB_ENV"
       - name: Unit tests
         run: python -m unittest discover -s tests -v
       - name: Syntax checks
         run: |
-          python -m py_compile scripts/run_dsh_session.py
+          python -m py_compile scripts/run_dsh_session.py scripts/watch_dsh_events.py scripts/dsh_web/*.py
           bash -n scripts/run-dsh-agent.sh scripts/install.sh
+      - name: Node available for YAML parser
+        run: node --version

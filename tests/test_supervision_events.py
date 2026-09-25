@@ -479,7 +479,9 @@ class StartFunctionTests(unittest.TestCase):
 class RestartRecoveryTests(unittest.TestCase):
     def make_restarted_daemon(self, state_path: Path, cwd: Path) -> controller.SessionDaemon:
         with mock.patch.object(controller, "DshSdk", return_value=None):
-            daemon = controller.SessionDaemon("write", cwd, state_path.parent / "write.sock", state_path)
+            daemon = controller.SessionDaemon(
+                "write", cwd, state_path.parent / "write.sock", state_path, backend="sdk"
+            )
         return daemon
 
     def test_restart_emits_one_recovery_failure_per_running_session(self) -> None:

@@ -5,7 +5,7 @@ description: Delegate bounded repository work to the local DeepSeek Harness head
 
 # DSH Scout
 
-Use the persistent SDK launcher so the user never has to copy prompts between Codex and DeepSeek Harness. The default route is OpenCode Go with GLM Flash; verify it when model identity matters. `DSH_SCOUT_PROVIDER` and `DSH_SCOUT_MODEL` override those defaults.
+Use the persistent scout launcher so the user never has to copy prompts between Codex and DeepSeek Harness. The default route is OpenCode Go with GLM Flash; verify it when model identity matters. `DSH_SCOUT_PROVIDER` and `DSH_SCOUT_MODEL` override those defaults.
 
 ## Choose the topology
 
@@ -16,7 +16,7 @@ Run sequentially by default.
 
 At most one writer and one reader may run at once. Never run two writers, two readers, or more than two DSH agents. The launcher locks enforce these limits.
 
-The SDK process runs with DSH's full-access preset so the writer can use its tools without interactive approval. For the reader, an outer bubblewrap boundary mounts all project roots read-only; the inner full-access preset only avoids an unsupported nested sandbox and cannot bypass those mounts.
+The owned DSH process runs with DSH's full-access preset so the writer can use its tools without interactive approval. For the reader, an outer bubblewrap boundary mounts all project roots read-only; the inner full-access preset only avoids an unsupported nested sandbox and cannot bypass those mounts.
 
 Full access does not expand the task: the writer inherits the selected worktree, repository instructions, OpenSpec and GitHub Issue workflow, external-action authority, and preservation requirements. It may commit, push, merge, deploy, or contact external systems only when the current task already authorizes that action.
 
@@ -63,6 +63,10 @@ Save the packet in a temporary prompt file outside the repository, then run:
 
 For the optional second scout, use `--mode read` and a key ending in `:reader`. The reader can run beside the writer; otherwise wait for one request to finish before starting another. Use `--timeout-seconds N` only when the default one-hour bound is unsuitable. Use `--rotate` only at a coherent boundary because it creates a handoff turn.
 
+The default backend is a scout-owned ordinary DSH web runtime. Immediately after dispatch, retrieve its authenticated URL with the same mode/cwd/provider/model and `--show-ui-url` (omit session-key and prompt-file). It works during a running turn. Open that URL for live progress and keep the same tab across turns. The normal prompt response prints only the token-free origin. Do not copy the authenticated URL into Issues, logs, or handoffs. A separate user-started DSH, such as port 3080, does not receive live events from this process.
+
+`DSH_SCOUT_BACKEND=sdk` explicitly selects the legacy SDK backend, which has no live scout UI. Never silently switch backends after failure. On any failed turn the controller stops its owned runtime before publishing failure; the next turn needs a complete packet. Historical sessions remain in DSH, but active context is not restored after a failure or controller restart. Never activate an active scout session in a second DSH host.
+
 If the command yields a running session, supervise it with durable supervision events, not by asking the user to relay status. The next section is mandatory on every delegation.
 
 ## Supervise with durable events
@@ -73,7 +77,7 @@ Every delegated DSH turn emits an append-only, user-private lifecycle event stre
 
 - Register supervision **immediately after dispatch**, using the host's asynchronous notification or a quiet Codex heartbeat; never ask the user to relay DSH status or output.
 - Subscribe from your persisted cursor: pass an exclusive `--after-sequence` (the greatest sequence you already processed) and deduplicate by `event_id`. Delivery is at-least-once.
-- Keep the launcher alive for the delegated turn. Cancelling it closes the request socket, terminates the active SDK process group, and emits `turn_failed`; the next prompt starts a fresh live session.
+- Keep the launcher alive for the delegated turn. Cancelling it closes the request socket, terminates the active owned backend process group (SDK or web runtime), and emits `turn_failed`; the next prompt starts a fresh live session.
 - Verify the result independently per the verification handoff before reporting anything.
 - Remove the monitor after a terminal event (`turn_completed`, `turn_failed`, `action_required`); never keep a heartbeat running past the settled result.
 

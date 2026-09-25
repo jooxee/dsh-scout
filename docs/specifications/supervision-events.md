@@ -127,6 +127,9 @@ removes itself after a terminal event.
 While a prompt is active, the controller also watches the requesting launcher's
 Unix socket. End-of-file means the launcher stopped waiting, so the controller
 must terminate that DSH turn instead of allowing an orphaned writer to continue.
+On the web backend each accepted connection runs on its own dispatch thread so a
+`ui-url` request is served concurrently with an active prompt — the writer
+lock and serial accept loop never block UI URL retrieval.
 
 ## State transitions
 
@@ -158,13 +161,18 @@ diff, tests and external records.
 
 - Controller restart keeps prior events and continues the sequence above the
   greatest valid record.
-- A prompt timeout emits `turn_failed` with reason `sdk-timeout`; a requesting
-  client disconnect emits it with reason `client-disconnected`. Both terminate
-  the SDK process group before the terminal event is published. Any other
-  prompt failure uses reason `prompt-failed` and follows the same invalidation
-  path because the SDK stream can no longer prove a reusable live session.
+- A prompt timeout emits `turn_failed` with reason `sdk-timeout` on the SDK
+  backend or `web-timeout` on the web backend; a requesting client disconnect
+  emits it with reason `client-disconnected`; any other prompt failure uses
+  reason `prompt-failed`. On the web backend cancellation success requires a
+  confirmed `turn/end` (or proven idle with no writer ever possible): cancel
+  rejection, confirmation timeout, broken transport, or ambiguous ownership
+  terminates the owned runtime process group BEFORE the terminal event is
+  published, records `live_session_lost`, and the next prompt starts a fresh
+  runtime generation. Persisted sessions are reused only when ownership and
+  terminal state are both proven.
 - The controller stays available after invalidation. The next prompt lazily
-  starts a fresh SDK process, creates a fresh live session, and reports
+  starts a fresh backend process, creates a fresh live session, and reports
   `restarted: true`; it never retries the failed prompt automatically.
 - If the controller died while a session was recorded as running, startup
   emits one `turn_failed` recovery event identifying controller restart; it
