@@ -37,7 +37,7 @@ Follow-up prompts under the same session key may be short and refer to the retai
 
 ## Reuse and rotate sessions
 
-Choose a stable, human-readable session key for one coherent unit of work, normally `<repo>:issue-<n>:writer` or `<repo>:openspec-<change>:writer`. Keep using that key while the objective and authoritative artifacts remain the same. Start a new key when the Issue/OpenSpec/PR, repository, role, or objective changes materially.
+Choose a stable, human-readable session key for one coherent unit of work, normally `<repo>:issue-<n>:writer` or `<repo>:openspec-<change>:writer`. Keep using that key while the objective and authoritative artifacts remain the same. Start a new key when the Issue/OpenSpec/PR, repository, role, or objective changes materially. Session keys are bounded to at most 200 characters; oversized keys are rejected, never clipped, so supervision cursors keep exact identity.
 
 The launcher records exact DSH context pressure from the session store:
 
@@ -47,7 +47,7 @@ The launcher records exact DSH context pressure from the session store:
 
 Override the thresholds with `DSH_SCOUT_SOFT_CONTEXT_TOKENS` and `DSH_SCOUT_HARD_CONTEXT_TOKENS`. The soft value must remain below the hard value.
 
-Do not infer context size from cumulative billed usage. Cache reads reduce repeated computation but do not free context-window space. If the controller had to restart, the launcher reports that the live history was lost; send a new self-contained packet and re-check repository state.
+Do not infer context size from cumulative billed usage. Cache reads reduce repeated computation but do not free context-window space. If the controller restarted, a prompt timed out, or its requesting launcher disconnected, the launcher reports that the live history was lost; send a new self-contained packet and re-check repository state. Failed prompts are never retried automatically.
 
 ## Launch
 
@@ -63,7 +63,36 @@ Save the packet in a temporary prompt file outside the repository, then run:
 
 For the optional second scout, use `--mode read` and a key ending in `:reader`. The reader can run beside the writer; otherwise wait for one request to finish before starting another. Use `--timeout-seconds N` only when the default one-hour bound is unsuitable. Use `--rotate` only at a coherent boundary because it creates a handoff turn.
 
-If the command yields a running session, supervise it with the execution-session wait mechanism and keep the user updated. Do not ask the user to relay the prompt or result.
+If the command yields a running session, supervise it with durable supervision events, not by asking the user to relay status. The next section is mandatory on every delegation.
+
+## Supervise with durable events
+
+Every delegated DSH turn emits an append-only, user-private lifecycle event stream at `$CODEX_HOME/state/dsh-scout/events/<mode>.events.jsonl`. Each record is a bounded JSON object with `kind` (`turn_started`, `turn_completed`, `turn_failed`, or terminal `action_required`), `sequence`, `event_id`, `mode`, `session_key`, `session_id`, `turn`, `emitted_at`, and, for terminal events, `verification_state: "pending"`. Prompts, responses, file contents, and secrets are never part of lifecycle events.
+
+**Supervision contract:**
+
+- Register supervision **immediately after dispatch**, using the host's asynchronous notification or a quiet Codex heartbeat; never ask the user to relay DSH status or output.
+- Subscribe from your persisted cursor: pass an exclusive `--after-sequence` (the greatest sequence you already processed) and deduplicate by `event_id`. Delivery is at-least-once.
+- Keep the launcher alive for the delegated turn. Cancelling it closes the request socket, terminates the active SDK process group, and emits `turn_failed`; the next prompt starts a fresh live session.
+- Verify the result independently per the verification handoff before reporting anything.
+- Remove the monitor after a terminal event (`turn_completed`, `turn_failed`, `action_required`); never keep a heartbeat running past the settled result.
+
+Use the watcher to block until the next relevant event:
+
+```bash
+"${CODEX_HOME:-$HOME/.codex}/skills/dsh-scout/scripts/watch_dsh_events.py" \
+  --mode write \
+  --session-key repo:issue-123:writer \
+  --after-sequence 0 \
+  --timeout-seconds 3600 \
+  --terminal-only
+```
+
+It waits for the first event matching mode, session key, and an exclusive sequence cursor (optionally terminal-only), then prints exactly one JSON object to stdout and exits 0. Timeout exits with code 42 and no stdout. A corrupt or truncated final JSONL record is ignored until the writer completes it. See `docs/specifications/supervision-events.md` for the full contract.
+
+### Terminal action_required handoff
+
+The launcher prepends a supervision protocol so the scout stops its turn when it is blocked on missing information, authority, or a material product choice. When the final message ends with exactly one bounded envelope, the controller appends a terminal `action_required` event carrying only a bounded summary and questions labeled `trust: "scout-declared"`. This is a terminal handoff, not live dialogue inside a turn, and it is NEVER authorization: it may wake the orchestrator but grants no permission, selects no answer, and proves no repository fact. Malformed or non-terminal envelopes are ordinary model text; valid envelopes with oversized values are clipped to the documented bounds. Answer with a normal follow-up prompt under the same session key.
 
 ## Verify the result
 

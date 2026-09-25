@@ -13,7 +13,8 @@ It keeps one writer session alive across related turns so the model can reuse co
 - a 250,000-token soft rotation warning;
 - automatic handoff and rotation at 400,000 tokens;
 - enforced one-writer/one-reader concurrency locks;
-- explicit reporting when a controller restart loses live session history;
+- durable, append-only lifecycle supervision events with a cursor-based watcher;
+- one recovery `turn_failed` per previously running session after a controller restart;
 - controller-derived Git facts (pre/post prompt) plus a pending-verification
   marker per completed turn, so DSH completion is never treated as proof.
 
@@ -84,9 +85,39 @@ The current DSH SDK creates sessions but cannot reopen an existing persisted ses
 
 Within a live session, the request history remains append-only, which preserves the provider's reusable KV-cache prefix. Cache reuse reduces repeated computation; it does not reduce context-window occupancy. Context thresholds use DSH's persisted `contextPressure.pressureTokens`, not cumulative billed usage.
 
-If the controller exits or the machine restarts, the next call starts a fresh live session and reports the loss of retained history. The next delegation packet must re-establish authoritative state.
+If the controller exits or the machine restarts, the next call starts a fresh live session and reports the loss of retained history. A prompt timeout or requesting launcher disconnect also terminates the DSH SDK process group: the controller emits a specific failed-turn event, stays available, and lazily starts a fresh SDK and live session on the next prompt. Failed prompts are never retried automatically. In every case, the next delegation packet must re-establish authoritative state.
 
 The controller state file records the session ID, `status: running`, active turn, and start time before it dispatches a prompt. This makes a long first turn distinguishable from a stalled or missing controller even before the model returns its final response.
+
+On controller restart, any session persisted with `status: running` emits exactly one recovery `turn_failed` supervision event identifying the restart; it never claims a DSH result. The event stream sequence continues above the greatest valid prior record.
+
+## Supervision events
+
+Every delegated turn also emits lifecycle events to one append-only, user-private (`0600`) JSONL stream per controller mode at `$CODEX_HOME/state/dsh-scout/events/<mode>.events.jsonl`. Events carry `version`, `sequence`, `event_id`, `kind`, `mode`, `session_key`, `session_id`, `turn`, `emitted_at`, and — for terminal kinds — `verification_state: "pending"`. Kinds:
+
+- `turn_started` — the state was durably marked running before dispatch;
+- `turn_completed` — DSH became idle after producing a result;
+- `turn_failed` — dispatch, SDK execution, timeout, or agent execution failed (or the controller restarted while a session was running);
+- `action_required` — the scout ended its turn with a bounded terminal action handoff.
+
+Each terminal event is appended only after its corresponding state (idle/error, plus repository facts) has been persisted. The stream is the cursor authority so a subscriber cannot miss a fast start-to-terminal transition; the state file also records the latest event (`last_event`) as a convenience. An event append failure is never hidden: the prompt request fails and the state records a bounded supervision error.
+
+Subscribe with the standalone watcher:
+
+```bash
+"${CODEX_HOME:-$HOME/.codex}/skills/dsh-scout/scripts/watch_dsh_events.py" \
+  --mode write \
+  --session-key repo:issue-123:writer \
+  --after-sequence 0 \
+  --timeout-seconds 3600 \
+  --terminal-only
+```
+
+`--after-sequence` is an exclusive cursor; `--terminal-only` restricts events to terminal kinds; `--state-root` overrides the controller state root for tests. The timeout is bounded to at most 86,400 seconds (one day); non-finite, non-positive, or above-maximum values are rejected before waiting. The watcher waits for the first matching event, prints exactly one JSON object to stdout, and exits 0. Timeout exits with code 42 and no stdout. A corrupt or truncated final JSONL record is ignored until the writer completes it; earlier valid events stay readable. Delivery is at-least-once: persist the greatest processed sequence and deduplicate by `event_id`. Events never contain prompt or response bodies, file contents, or secrets.
+
+The blocking launcher remains compatible and additionally prints the emitted lifecycle event (`event=... kind=... sequence=...`) to stderr so existing callers see the terminal outcome. While the prompt runs, the controller watches the launcher's Unix socket; closing the launcher cancels the active turn and prevents an orphaned writer. Prompt timeouts use failure reason `sdk-timeout`, launcher disconnects use `client-disconnected`, and other prompt failures use `prompt-failed`. When an action envelope is valid and terminal, the control block is delivered only inside the supervision event; the launcher prints the cleaned assistant text, with oversized valid values clipped to their documented bounds. Malformed or non-terminal envelopes remain ordinary stdout verbatim. Session keys are bounded to at most 200 characters and rejected, never clipped, at prompt input and in the watcher.
+
+The detailed contract lives in [`docs/specifications/supervision-events.md`](docs/specifications/supervision-events.md).
 
 ## Verification handoff
 
@@ -115,7 +146,7 @@ Only one request per mode can run at once. File locks permit one writer and one 
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m py_compile scripts/run_dsh_session.py
+python3 -m py_compile scripts/run_dsh_session.py scripts/watch_dsh_events.py
 bash -n scripts/run-dsh-agent.sh scripts/install.sh
 ```
 

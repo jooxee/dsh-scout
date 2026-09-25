@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import selectors
 import signal
 import shutil
@@ -28,6 +29,25 @@ from typing import Any
 
 
 DEFAULT_TIMEOUT = 3600
+ACTION_OPEN = "<dsh-scout-action-required-v1>"
+ACTION_CLOSE = "</dsh-scout-action-required-v1>"
+ACTION_SUMMARY_LIMIT = 500
+ACTION_QUESTION_LIMIT = 500
+ACTION_QUESTIONS_LIMIT = 3
+TERMINAL_EVENT_KINDS = {"action_required", "turn_completed", "turn_failed"}
+SUPERVISION_ERROR_LIMIT = 200
+SESSION_KEY_LIMIT = 200
+SDK_ABORT_TIMEOUT_SECONDS = 5
+ACTION_PATTERN = re.compile(
+    rf"{re.escape(ACTION_OPEN)}\s*\n(.*?)\n{re.escape(ACTION_CLOSE)}\s*$",
+    re.DOTALL,
+)
+
+RECOVERY_REASON = "controller-restart-recovery"
+
+
+class ClientDisconnectedError(ConnectionError):
+    """The launcher stopped waiting while its DSH turn was still active."""
 
 
 def positive_env_int(name: str, default: int) -> int:
@@ -101,6 +121,150 @@ def wait_session_stats(identifier: str, expected_turn: int) -> dict[str, Any]:
     return latest
 
 
+def parse_action_required(text: str) -> tuple[str, dict[str, Any] | None]:
+    """Extract one strictly terminal, bounded scout-declared action request.
+
+    The envelope must terminate the final assistant message. Anything else —
+    malformed JSON, unknown fields, an envelope that is not at the end — stays
+    ordinary model text and never becomes a supervision event.
+    """
+    match = ACTION_PATTERN.search(text)
+    if match is None:
+        return text, None
+    try:
+        value = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return text, None
+    if not isinstance(value, dict) or set(value) != {"summary", "questions"}:
+        return text, None
+    summary = value.get("summary")
+    questions = value.get("questions")
+    if not isinstance(summary, str) or not summary.strip() or not isinstance(questions, list):
+        return text, None
+    if not questions or any(not isinstance(item, str) or not item.strip() for item in questions):
+        return text, None
+    bounded = {
+        "trust": "scout-declared",
+        "summary": summary.strip()[:ACTION_SUMMARY_LIMIT],
+        "questions": [
+            item.strip()[:ACTION_QUESTION_LIMIT]
+            for item in questions[:ACTION_QUESTIONS_LIMIT]
+        ],
+    }
+    return text[: match.start()].rstrip(), bounded
+
+
+class SupervisionEvents:
+    """Append-only, user-private lifecycle events for one controller mode."""
+
+    def __init__(self, path: Path, mode: str) -> None:
+        self.path = path
+        self.mode = mode
+        self.sequence = self._last_sequence()
+
+    def records(self) -> list[dict[str, Any]]:
+        """All durably valid JSON event records in the stream, in order."""
+        try:
+            lines = self.path.read_text().splitlines()
+        except (FileNotFoundError, OSError):
+            return []
+        events: list[dict[str, Any]] = []
+        for line in lines:
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                # A truncated or partially written record is ignored until
+                # the writer completes it; earlier valid records remain.
+                continue
+            if isinstance(value, dict):
+                events.append(value)
+        return events
+
+    def _last_sequence(self) -> int:
+        greatest = 0
+        for value in self.records():
+            if isinstance(value.get("sequence"), int):
+                greatest = max(greatest, value["sequence"])
+        return max(0, greatest)
+
+    def recovery_records(self) -> set[tuple[str, str | None, int]]:
+        """Controller-derived identities of durable restart recovery failures.
+
+        The identity is ``(session_key, session_id, turn)``: only an exact
+        match proves that recovery already happened for that exact abandoned
+        turn, so a later fresh DSH session reusing the same key still gets its
+        own recovery event.
+        """
+        records: set[tuple[str, str | None, int]] = set()
+        for event in self.records():
+            if (
+                event.get("kind") == "turn_failed"
+                and event.get("reason") == RECOVERY_REASON
+                and isinstance(event.get("session_key"), str)
+                and isinstance(event.get("sequence"), int)
+                and isinstance(event.get("turn"), int)
+            ):
+                session_id_value = event.get("session_id")
+                if session_id_value is not None and not isinstance(session_id_value, str):
+                    session_id_value = str(session_id_value)[:SUPERVISION_ERROR_LIMIT]
+                records.add(
+                    (event["session_key"][:SUPERVISION_ERROR_LIMIT], session_id_value, event["turn"])
+                )
+        return records
+
+    def append(
+        self,
+        *,
+        kind: str,
+        session_key: str,
+        session_id_value: str | None,
+        turn: int,
+        action: dict[str, Any] | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        if kind not in {"turn_started", *TERMINAL_EVENT_KINDS}:
+            raise ValueError(f"unsupported supervision event kind: {kind}")
+        self.sequence += 1
+        event: dict[str, Any] = {
+            "version": 1,
+            "sequence": self.sequence,
+            "event_id": f"{self.mode}:{self.sequence}",
+            "kind": kind,
+            "mode": self.mode,
+            "session_key": session_key,
+            "session_id": session_id_value,
+            "turn": turn,
+            "emitted_at": int(time.time()),
+        }
+        if kind in TERMINAL_EVENT_KINDS:
+            event["verification_state"] = "pending"
+        if reason is not None:
+            event["reason"] = reason[:SUPERVISION_ERROR_LIMIT]
+        if action is not None:
+            event["action"] = action
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(
+            self.path,
+            os.O_APPEND | os.O_CREAT | os.O_RDWR,
+            0o600,
+        )
+        try:
+            payload = (json.dumps(event, ensure_ascii=False) + "\n").encode()
+            size = os.lseek(descriptor, 0, os.SEEK_END)
+            if size > 0:
+                # With O_APPEND every write extends EOF; only check the last
+                # byte with pread (no offset movement needed).
+                if os.pread(descriptor, 1, size - 1) != b"\n":
+                    # Finish a partially written record on its own line.
+                    os.write(descriptor, b"\n")
+            os.write(descriptor, payload)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.chmod(self.path, 0o600)
+        return event
+
+
 class DshSdk:
     def __init__(self, cwd: Path, log_path: Path) -> None:
         self.cwd = cwd
@@ -117,6 +281,7 @@ class DshSdk:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            start_new_session=True,
         )
         assert self.process.stdin is not None
         assert self.process.stdout is not None
@@ -155,15 +320,37 @@ class DshSdk:
         self.process.stdin.flush()
         return request_id
 
-    def _read_frame(self, deadline: float) -> dict[str, Any]:
+    def _read_frame(
+        self,
+        deadline: float,
+        client_socket: socket.socket | None = None,
+    ) -> dict[str, Any]:
         assert self.process.stdout is not None
         selector = selectors.DefaultSelector()
-        selector.register(self.process.stdout, selectors.EVENT_READ)
+        selector.register(self.process.stdout, selectors.EVENT_READ, "sdk")
+        if client_socket is not None:
+            selector.register(client_socket, selectors.EVENT_READ, "client")
         try:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or not selector.select(remaining):
-                raise TimeoutError("Timed out waiting for DSH SDK")
-            line = self.process.stdout.readline()
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Timed out waiting for DSH SDK")
+                ready = selector.select(remaining)
+                if not ready:
+                    raise TimeoutError("Timed out waiting for DSH SDK")
+                for key, _ in ready:
+                    if key.data != "client":
+                        continue
+                    try:
+                        client_data = client_socket.recv(1, socket.MSG_PEEK) if client_socket is not None else b""
+                    except OSError as error:
+                        raise ClientDisconnectedError("DSH request client disconnected") from error
+                    if client_data == b"":
+                        raise ClientDisconnectedError("DSH request client disconnected")
+                    raise ConnectionError("DSH request client sent unexpected data")
+                if any(key.data == "sdk" for key, _ in ready):
+                    line = self.process.stdout.readline()
+                    break
         finally:
             selector.close()
         if not line:
@@ -177,7 +364,13 @@ class DshSdk:
             if frame.get("id") == request_id:
                 return frame
 
-    def prompt(self, identifier: str, text: str, timeout: int) -> str:
+    def prompt(
+        self,
+        identifier: str,
+        text: str,
+        timeout: int,
+        client_socket: socket.socket | None = None,
+    ) -> str:
         request_id = self._send(
             "session/prompt",
             {
@@ -191,7 +384,7 @@ class DshSdk:
         latest_text = ""
         failure: str | None = None
         while True:
-            frame = self._read_frame(deadline)
+            frame = self._read_frame(deadline, client_socket)
             if frame.get("id") == request_id:
                 if "error" in frame:
                     raise RuntimeError(f"DSH prompt failed: {frame['error']}")
@@ -235,11 +428,35 @@ class DshSdk:
             request_id = self._send("shutdown")
             self._wait_for_response(request_id, 30)
         except Exception:
-            self.process.terminate()
+            self.abort()
+            return
         try:
             self.process.wait(timeout=30)
         except subprocess.TimeoutExpired:
+            self.abort()
+
+    def abort(self) -> None:
+        """Stop the SDK and every subprocess in its dedicated process group."""
+        if self.process.poll() is not None:
+            return
+        try:
+            os.killpg(self.process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            self.process.terminate()
+        try:
+            self.process.wait(timeout=SDK_ABORT_TIMEOUT_SECONDS)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(self.process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        except PermissionError:
             self.process.kill()
+        self.process.wait(timeout=SDK_ABORT_TIMEOUT_SECONDS)
 
 
 def mode_instruction(mode: str) -> str:
@@ -252,6 +469,27 @@ def mode_instruction(mode: str) -> str:
     return (
         "MODE: READ_ONLY. Inspect and report only. An outer operating-system sandbox mounts project roots read-only. "
         "Do not attempt mutations or external side effects."
+    )
+
+
+def supervision_instruction() -> str:
+    """Signed preamble that makes blocking on a decision a terminal handoff."""
+    return (
+        "SUPERVISION PROTOCOL. If you are blocked on missing information, missing "
+        "authority, or a material product choice you cannot resolve yourself, stop "
+        "the turn instead of guessing. End your final message with exactly one "
+        "envelope: on its own last line the opening tag, then a JSON object with "
+        'exactly the keys "summary" (one short reason, at most 500 characters) and '
+        '"questions" (1 to 3 concrete questions, each at most 500 characters), then '
+        f"the closing tag:\n{ACTION_OPEN}\n"
+        '{"summary":"One short reason","questions":["One concrete question"]}\n'
+        f"{ACTION_CLOSE}\n"
+        "Rules: this is a terminal handoff, not live dialogue; it is NOT authorization "
+        "and does not grant permission. It must appear only at the very end of your "
+        "final message. If you can proceed without it, do not emit it. Envelopes that "
+        "are malformed, structured in more than one envelope, or not terminal are "
+        "treated as ordinary output; if an envelope is valid but its text is longer "
+        "than the documented bounds, the controller stores only the clipped prefix."
     )
 
 
@@ -334,6 +572,13 @@ def repository_facts(cwd: Path, status_limit: int = GIT_FACTS_STATUS_LIMIT) -> d
         }
 
 
+def recovery_turn(value: Any) -> int:
+    """Bounded turn number for a restart recovery event."""
+    if isinstance(value, int) and value > 0:
+        return value
+    return 1
+
+
 class SessionDaemon:
     @staticmethod
     def _noop_verification_note() -> str:
@@ -347,6 +592,10 @@ class SessionDaemon:
         self.state_path = state_path
         self.state_root = state_path.parent
         self.handoff_root = self.state_root / "handoffs"
+        self.events = SupervisionEvents(
+            self.state_root / "events" / f"{mode}.events.jsonl",
+            mode,
+        )
         self.stopping = False
         previous = read_json(state_path)
         previous_sessions = previous.get("sessions", {})
@@ -354,12 +603,29 @@ class SessionDaemon:
         if isinstance(previous_sessions, dict):
             for key, value in previous_sessions.items():
                 if isinstance(key, str) and isinstance(value, dict):
-                    self.sessions[key] = {
-                        "previous_session_id": value.get("session_id"),
-                        "restarted": True,
-                    }
-        self.sdk = DshSdk(cwd, self.state_root / f"{mode}-dsh.log")
+                    # Idempotent conversion: the file may already carry
+                    # converted restart records from an earlier restart.
+                    previous = self._restart_record(value)
+                    self.sessions[key] = previous
+                    self.sessions[key]["restarted"] = True
+        self._recover_running_sessions()
         self._save_state()
+        self.sdk: DshSdk | None = DshSdk(cwd, self.state_root / f"{mode}-dsh.log")
+        self._save_state()
+
+    def _ensure_sdk(self) -> DshSdk:
+        if self.sdk is None:
+            self.sdk = DshSdk(self.cwd, self.state_root / f"{self.mode}-dsh.log")
+        return self.sdk
+
+    def _discard_sdk(self) -> None:
+        sdk = self.sdk
+        self.sdk = None
+        if sdk is None:
+            return
+        abort = getattr(sdk, "abort", None)
+        if callable(abort):
+            abort()
 
     def _save_state(self) -> None:
         atomic_json(
@@ -379,22 +645,138 @@ class SessionDaemon:
             },
         )
 
+    def _restart_record(self, value: dict[str, Any]) -> dict[str, Any]:
+        """Convert one persisted session record for restart, idempotently."""
+        session_id_value = value.get("session_id")
+        if session_id_value is None:
+            session_id_value = value.get("previous_session_id")
+        status_value = value.get("status")
+        if status_value is None:
+            status_value = value.get("previous_status")
+        turn_value = value.get("previous_active_turn")
+        if not isinstance(turn_value, int) or turn_value <= 0:
+            turn_value = value.get("active_turn")
+        if not isinstance(turn_value, int):
+            turn_value = None
+        record: dict[str, Any] = {
+            "previous_session_id": session_id_value,
+            "previous_status": status_value,
+            "previous_active_turn": turn_value,
+        }
+        if value.get("recovered"):
+            record["recovered"] = value["recovered"]
+        return record
+
+    def _recover_running_sessions(self) -> None:
+        """Emit one recovery failure for every session left running last time.
+
+        Deduplication is durable: the event stream itself carries controller-
+        derived evidence of an earlier recovery for the same session key, so a
+        crash between event append and state persistence cannot duplicate it.
+        """
+        recovered_records = self.events.recovery_records()
+        for key, record in self.sessions.items():
+            identity = (
+                key[:SUPERVISION_ERROR_LIMIT],
+                record.get("previous_session_id"),
+                recovery_turn(record.get("previous_active_turn")),
+            )
+            if identity in recovered_records:
+                record["recovered"] = True
+                continue
+            if not self._needs_recovery(record):
+                continue
+            self.events.append(
+                kind="turn_failed",
+                session_key=key,
+                session_id_value=record["previous_session_id"],
+                turn=recovery_turn(record.get("previous_active_turn")),
+                reason=RECOVERY_REASON,
+            )
+            record["recovered"] = True
+
+    @staticmethod
+    def _needs_recovery(record: Any) -> bool:
+        return (
+            record.get("previous_status") == "running"
+            and "previous_session_id" in record
+            and not record.get("recovered")
+        )
+
+    def _emit_event(
+        self,
+        current: dict[str, Any],
+        kind: str,
+        *,
+        session_key: str,
+        turn: int,
+        action: dict[str, Any] | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Append one lifecycle event; persist state FIRST and record the result.
+
+        A failed append is never hidden: the session state records a bounded
+        supervision error and the running prompt request fails visibly.
+        """
+        try:
+            event = self.events.append(
+                kind=kind,
+                session_key=session_key,
+                session_id_value=current.get("session_id"),
+                turn=turn,
+                action=action,
+                reason=reason,
+            )
+        except OSError as error:
+            note = f"supervision event append failed: {error.__class__.__name__}"[:SUPERVISION_ERROR_LIMIT]
+            current["status"] = "error"
+            current["last_error"] = note
+            current["last_error_at"] = int(time.time())
+            self._save_state()
+            raise RuntimeError(f"DSH {self.mode} supervision event append failed: {note}") from error
+        current["last_event"] = {
+            "event_id": event["event_id"],
+            "kind": event["kind"],
+            "sequence": event["sequence"],
+        }
+        self._save_state()
+        return event
+
     def _session(self, key: str) -> dict[str, Any]:
         current = self.sessions.get(key)
-        if current is None or "session_id" not in current:
+        live_session_lost = bool(current and current.get("live_session_lost"))
+        if current is None or "session_id" not in current or live_session_lost:
             current = {
                 "session_id": session_id(),
                 "turns": 0,
                 "context_tokens": 0,
                 "context_window": 0,
                 "created_at": int(time.time()),
-                "restarted": bool(current and current.get("restarted")),
+                "restarted": bool(current and (current.get("restarted") or live_session_lost)),
             }
             self.sessions[key] = current
         return current
 
-    def _rotate(self, key: str, current: dict[str, Any], timeout: int) -> tuple[dict[str, Any], str]:
-        summary = self.sdk.prompt(current["session_id"], handoff_prompt(), timeout)
+    def _prompt_sdk(
+        self,
+        identifier: str,
+        text: str,
+        timeout: int,
+        client_socket: socket.socket | None,
+    ) -> str:
+        sdk = self._ensure_sdk()
+        if client_socket is None:
+            return sdk.prompt(identifier, text, timeout)
+        return sdk.prompt(identifier, text, timeout, client_socket=client_socket)
+
+    def _rotate(
+        self,
+        key: str,
+        current: dict[str, Any],
+        timeout: int,
+        client_socket: socket.socket | None,
+    ) -> tuple[dict[str, Any], str]:
+        summary = self._prompt_sdk(current["session_id"], handoff_prompt(), timeout, client_socket)
         digest = hashlib.sha256(key.encode()).hexdigest()[:16]
         timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         path = self.handoff_root / f"{self.mode}-{digest}-{timestamp}.md"
@@ -413,7 +795,11 @@ class SessionDaemon:
         self._save_state()
         return replacement, summary
 
-    def handle(self, request: dict[str, Any]) -> dict[str, Any]:
+    def handle(
+        self,
+        request: dict[str, Any],
+        client_socket: socket.socket | None = None,
+    ) -> dict[str, Any]:
         if request.get("action") == "ping":
             return {"ok": True, "pid": os.getpid(), "cwd": str(self.cwd), "mode": self.mode}
         if request.get("action") == "shutdown":
@@ -426,10 +812,15 @@ class SessionDaemon:
         timeout = int(request.get("timeout", DEFAULT_TIMEOUT))
         if not isinstance(key, str) or not key.strip():
             return {"ok": False, "error": "session_key must be a non-empty string"}
+        if len(key) > SESSION_KEY_LIMIT:
+            return {"ok": False, "error": f"session_key must be at most {SESSION_KEY_LIMIT} characters"}
         if not isinstance(prompt, str) or not prompt.strip():
             return {"ok": False, "error": "prompt must be a non-empty string"}
+        self._ensure_sdk()
         current = self._session(key)
         restarted = bool(current.pop("restarted", False))
+        for stale in ("previous_session_id", "previous_status", "previous_active_turn", "recovered"):
+            current.pop(stale, None)
         started_at = int(time.time())
         current["status"] = "running"
         current["active_turn"] = int(current.get("turns", 0)) + 1
@@ -437,29 +828,51 @@ class SessionDaemon:
         current["updated_at"] = started_at
         # Record controller-derived repository facts BEFORE the prompt runs.
         current["handoff_pre_facts"] = repository_facts(self.cwd)
+        # State, including pre-facts, is persisted BEFORE turn_started.
         self._save_state()
+        self._emit_event(current, "turn_started", session_key=key, turn=current["active_turn"])
         rotate = bool(request.get("rotate")) or int(current.get("context_tokens", 0)) >= HARD_CONTEXT_TOKENS
         handoff = ""
         try:
             if rotate and int(current.get("turns", 0)) > 0:
-                current, handoff = self._rotate(key, current, timeout)
+                current, handoff = self._rotate(key, current, timeout, client_socket)
                 current["status"] = "running"
                 current["active_turn"] = 1
                 current["prompt_started_at"] = started_at
                 current["updated_at"] = int(time.time())
                 self._save_state()
-            full_prompt = f"{mode_instruction(self.mode)}\n\n{prompt}"
+            header = f"{mode_instruction(self.mode)}\n\n{supervision_instruction()}\n\n"
             if handoff:
                 full_prompt = (
-                    f"{mode_instruction(self.mode)}\n\n"
-                    "You are continuing a rotated DSH scout session. Treat this handoff as working context; verify mutable facts in the repository.\n\n"
+                    header
+                    + "You are continuing a rotated DSH scout session. Treat this handoff as working context; verify mutable facts in the repository.\n\n"
                     f"--- HANDOFF ---\n{handoff}\n--- END HANDOFF ---\n\n{prompt}"
                 )
-            answer = self.sdk.prompt(current["session_id"], full_prompt, timeout)
-        except Exception:
+            else:
+                full_prompt = header + prompt
+            answer = self._prompt_sdk(current["session_id"], full_prompt, timeout, client_socket)
+        except Exception as error:
+            # Error state FIRST, then the terminal turn_failed event.
             current["status"] = "error"
             current["last_error_at"] = int(time.time())
-            current.pop("active_turn", None)
+            turn_on_failure = int(current.pop("active_turn", 0)) or int(current.get("turns", 0)) + 1
+            self._save_state()
+            self._discard_sdk()
+            if isinstance(error, TimeoutError):
+                failure_reason = "sdk-timeout"
+            elif isinstance(error, ClientDisconnectedError):
+                failure_reason = "client-disconnected"
+            else:
+                failure_reason = "prompt-failed"
+            self._emit_event(
+                current,
+                "turn_failed",
+                session_key=key,
+                turn=turn_on_failure,
+                reason=failure_reason,
+            )
+            current["live_session_lost"] = True
+            current["restarted"] = True
             self._save_state()
             raise
         expected_turn = int(current.get("turns", 0)) + 1
@@ -480,11 +893,31 @@ class SessionDaemon:
             "state": "pending",
             "reason": "DSH handoff completed; the orchestrator must independently verify the actual repository state.",
         }
+        # Idle state, verification facts, and post facts are persisted BEFORE
+        # the terminal action_required or turn_completed event.
         self._save_state()
+        # For a valid terminal envelope the control block is returned only
+        # inside the supervision event, never in the ordinary output text.
+        final_text, action = parse_action_required(answer)
+        if action is not None:
+            event = self._emit_event(
+                current,
+                "action_required",
+                session_key=key,
+                turn=expected_turn,
+                action=action,
+            )
+        else:
+            event = self._emit_event(
+                current,
+                "turn_completed",
+                session_key=key,
+                turn=expected_turn,
+            )
         context_tokens = int(current.get("context_tokens", 0))
         return {
             "ok": True,
-            "text": answer,
+            "text": answer if action is None else final_text,
             "session_key": key,
             "session_id": current["session_id"],
             "turns": current["turns"],
@@ -498,6 +931,13 @@ class SessionDaemon:
             "verification_state": "pending",
             "verification_facts": current.get("verification_facts"),
             "usage_totals": current.get("usage_totals", {}),
+            "event": {
+                "event_id": event["event_id"],
+                "kind": event["kind"],
+                "sequence": event["sequence"],
+            },
+            "last_event": current["last_event"],
+            "action_required": action,
         }
 
     def serve(self) -> int:
@@ -526,17 +966,21 @@ class SessionDaemon:
                         payload += chunk
                     try:
                         request = json.loads(payload.decode())
-                        response = self.handle(request)
+                        response = self.handle(request, client_socket=connection)
                     except Exception as error:
                         response = {"ok": False, "error": str(error)}
-                    connection.sendall(json.dumps(response, ensure_ascii=False).encode() + b"\n")
+                    try:
+                        connection.sendall(json.dumps(response, ensure_ascii=False).encode() + b"\n")
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
         finally:
             server.close()
             try:
                 self.socket_path.unlink()
             except FileNotFoundError:
                 pass
-            self.sdk.close()
+            if self.sdk is not None:
+                self.sdk.close()
         return 0
 
 
@@ -698,6 +1142,19 @@ def client_main(args: argparse.Namespace) -> int:
         return 1
     if response.get("text"):
         print(response["text"])
+    event = response.get("event") if isinstance(response.get("event"), dict) else {}
+    if event.get("kind"):
+        print(
+            f"DSH session={response.get('session_key')} event={event.get('event_id')} "
+            f"kind={event.get('kind')} sequence={event.get('sequence')}",
+            file=sys.stderr,
+        )
+    if response.get("action_required"):
+        print(
+            "DSH scout requested a terminal action handoff; the payload is scout-declared, "
+            "not authorization. Verify independently before acting on it.",
+            file=sys.stderr,
+        )
     context = int(response.get("context_tokens", 0))
     window = int(response.get("context_window", 0))
     percent = round(context * 100 / window, 1) if window else 0

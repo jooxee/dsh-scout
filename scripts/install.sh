@@ -25,5 +25,6 @@ install -m 0644 "$repo_root/SKILL.md" "$destination/SKILL.md"
 install -m 0644 "$repo_root/agents/openai.yaml" "$destination/agents/openai.yaml"
 install -m 0755 "$repo_root/scripts/run-dsh-agent.sh" "$destination/scripts/run-dsh-agent.sh"
 install -m 0755 "$repo_root/scripts/run_dsh_session.py" "$destination/scripts/run_dsh_session.py"
+install -m 0755 "$repo_root/scripts/watch_dsh_events.py" "$destination/scripts/watch_dsh_events.py"
 
 printf 'Installed dsh-scout at %s\n' "$destination"
