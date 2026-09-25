@@ -5,7 +5,15 @@ description: Delegate bounded repository work to the local DeepSeek Harness head
 
 # DSH Scout
 
-Use the persistent scout launcher so the user never has to copy prompts between Codex and DeepSeek Harness. The default route is OpenCode Go with GLM Flash; verify it when model identity matters. `DSH_SCOUT_PROVIDER` and `DSH_SCOUT_MODEL` override those defaults.
+Use the persistent scout launcher so the user never has to copy prompts between the host and DeepSeek Harness.
+
+## Confirm the model route
+
+Before dispatch, state the exact provider/model and use only a route the user has approved for this work. Set both `DSH_SCOUT_PROVIDER` and `DSH_SCOUT_MODEL` explicitly for launch and UI commands. If no approved route is known, ask before starting the scout; continue independent local work meanwhile. A running controller, successful historical test or CLI default is not model approval. The CLI compatibility defaults are `opencode-go / glm-5.3-flash`.
+
+Model selection can consume a limited allowance. On provider/model failure, report it and obtain agreement before substituting another route. Never silently switch models or retry on a different provider. These are orchestrator instructions, not a runtime-enforced spending cap.
+
+The skill package is portable across Linux-capable hosts that discover Agent Skills under their own user directory (Codex, Claude Code, OpenCode, Pi, Oh My Pi, Cursor). After installation the scripts run from their own installed directory and use absolute paths joined to that directory at runtime, so the same package works regardless of the host's project cwd.
 
 ## Choose the topology
 
@@ -47,19 +55,23 @@ The launcher records exact DSH context pressure from the session store:
 
 Override the thresholds with `DSH_SCOUT_SOFT_CONTEXT_TOKENS` and `DSH_SCOUT_HARD_CONTEXT_TOKENS`. The soft value must remain below the hard value.
 
-Do not infer context size from cumulative billed usage. Cache reads reduce repeated computation but do not free context-window space. If the controller restarted, a prompt timed out, or its requesting launcher disconnected, the launcher reports that the live history was lost; send a new self-contained packet and re-check repository state. Failed prompts are never retried automatically.
+Do not infer context size from cumulative billed usage. Cache reads reduce repeated computation but do not free context-window space. If the controller restarted, a prompt timed out, or its requesting host disconnected, the launcher reports that the live history was lost; send a new self-contained packet and re-check repository state. Failed prompts are never retried automatically.
 
 ## Launch
+
+Resolve the absolute directory containing this loaded `SKILL.md`. Set `DSH_SCOUT_HOME` to that directory in each shell invocation, or use its absolute script paths directly. It is a shell convenience variable, not an automatically populated runtime setting. Keep the repository's exact path in `--cwd`; do not change it to the skill directory. For installation and discovery details, read [docs/integrations.md](docs/integrations.md).
 
 Save the packet in a temporary prompt file outside the repository, then run:
 
 ```bash
-"${CODEX_HOME:-$HOME/.codex}/skills/dsh-scout/scripts/run-dsh-agent.sh" \
+"${DSH_SCOUT_HOME}/scripts/run-dsh-agent.sh" \
   --mode write \
   --cwd /absolute/project/path \
   --session-key repo:issue-123:writer \
   --prompt-file /absolute/path/to/prompt.txt
 ```
+
+Use the same approved provider/model environment on every follow-up and UI command.
 
 For the optional second scout, use `--mode read` and a key ending in `:reader`. The reader can run beside the writer; otherwise wait for one request to finish before starting another. Use `--timeout-seconds N` only when the default one-hour bound is unsuitable. Use `--rotate` only at a coherent boundary because it creates a handoff turn.
 
@@ -71,11 +83,11 @@ If the command yields a running session, supervise it with durable supervision e
 
 ## Supervise with durable events
 
-Every delegated DSH turn emits an append-only, user-private lifecycle event stream at `$CODEX_HOME/state/dsh-scout/events/<mode>.events.jsonl`. Each record is a bounded JSON object with `kind` (`turn_started`, `turn_completed`, `turn_failed`, or terminal `action_required`), `sequence`, `event_id`, `mode`, `session_key`, `session_id`, `turn`, `emitted_at`, and, for terminal events, `verification_state: "pending"`. Prompts, responses, file contents, and secrets are never part of lifecycle events.
+Every delegated DSH turn emits an append-only, user-private lifecycle event stream at `${CODEX_HOME:-$HOME/.codex}/state/dsh-scout/events/<mode>.events.jsonl`. All harnesses must use the same `HOME`, `CODEX_HOME` and `XDG_RUNTIME_DIR` environment for shared controller/state and locks. Keep the default socket/state paths. Installation location does not create a separate writer; changing runtime roots can break coordination. The legacy Codex directory names are compatibility paths and require no Codex process. Each record is a bounded JSON object with `kind` (`turn_started`, `turn_completed`, `turn_failed`, or terminal `action_required`), `sequence`, `event_id`, `mode`, `session_key`, `session_id`, `turn`, `emitted_at`, and, for terminal events, `verification_state: "pending"`. Prompts, responses, file contents, and secrets are never part of lifecycle events.
 
 **Supervision contract:**
 
-- Register supervision **immediately after dispatch**, using the host's asynchronous notification or a quiet Codex heartbeat; never ask the user to relay DSH status or output.
+- Register supervision **immediately after dispatch**, using the host's asynchronous completion notification when it provides one; otherwise keep the request in the foreground and observe its terminal event directly. A filesystem event stream alone cannot wake an idle host that has no completion channel, and the launcher foreground fallback exists precisely so this contract does not silently vanish.
 - Subscribe from your persisted cursor: pass an exclusive `--after-sequence` (the greatest sequence you already processed) and deduplicate by `event_id`. Delivery is at-least-once.
 - Keep the launcher alive for the delegated turn. Cancelling it closes the request socket, terminates the active owned backend process group (SDK or web runtime), and emits `turn_failed`; the next prompt starts a fresh live session.
 - Verify the result independently per the verification handoff before reporting anything.
@@ -84,7 +96,7 @@ Every delegated DSH turn emits an append-only, user-private lifecycle event stre
 Use the watcher to block until the next relevant event:
 
 ```bash
-"${CODEX_HOME:-$HOME/.codex}/skills/dsh-scout/scripts/watch_dsh_events.py" \
+"${DSH_SCOUT_HOME}/scripts/watch_dsh_events.py" \
   --mode write \
   --session-key repo:issue-123:writer \
   --after-sequence 0 \
@@ -106,15 +118,15 @@ Treat every DSH response as a handoff, not proof. After a writer turn, inspect t
 
 DSH completion is never proof that a repository task is correct. Per completed turn the controller records, inside the existing state file, two machine-readable `repository_facts` snapshots (one captured at prompt dispatch, one after completion) plus a `verification: {"state": "pending"}` marker. The snapshots are derived only by the controller from the selected working directory — repository root, HEAD, branch, bounded porcelain status, and upstream divergence where safely available; a bounded error is stored when cwd is not a Git worktree or Git fails. No file contents, prompts, model output, or secrets are captured and no model-provided command is executed.
 
-When a turn completes, the wrapper prints to stderr that the DSH handoff completed but **independent orchestrator verification is pending**, with the session key and state-file location.
+When a turn completes, the wrapper prints to stderr that the DSH handoff completed but **independent verification is pending**, with the session key and state-file location.
 
-Before reporting any DSH work to a repository owner, the orchestrator must independently verify:
+Before reporting any DSH work to a repository owner, the verifier must independently verify:
 
 - the actual diff (compare the post-turn working tree and HEAD against the pre-turn snapshot);
 - commits exist and were pushed where required;
 - declared checks, tests, lint, or builds actually pass;
 - GitHub Issue / OpenSpec / PR records reflect what was done.
 
-Limitations of the protocol: snapshots are point-in-time and racy — concurrent edits between dispatch and completion, DSH activity across multiple sessions, or manual changes are not attributed to the turn. The controller never executes builds, tests, auto-merge, or deploy and never judges repository correctness; `verification: pending` means exactly that a human/orchestrator still owns the independent verification step.
+Limitations of the protocol: snapshots are point-in-time and racy — concurrent edits between dispatch and completion, DSH activity across multiple sessions, or manual changes are not attributed to the turn. The controller never executes builds, tests, auto-merge, or deploy and never judges repository correctness; `verification: pending` means exactly that a human/verifier still owns the independent verification step.
 
-Resolve inconsistencies in the authoritative repository state. Report which work DSH performed, what Codex independently verified, and what remains unverified.
+Resolve inconsistencies in the authoritative repository state. Report which work DSH performed, what an independent verifier confirmed, and what remains unverified.

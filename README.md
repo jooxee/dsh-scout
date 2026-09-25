@@ -1,6 +1,6 @@
 # dsh-scout
 
-`dsh-scout` is a Codex skill for delegating repository work to a local [DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness) agent without copying prompts between tools.
+`dsh-scout` is a portable Agent Skill and local command interface for delegating repository work to a [DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness) agent. Codex, Claude Code, OpenCode, Pi, Oh My Pi, Cursor and other shell-capable local harnesses can use the same runtime.
 
 It keeps one writer session alive across related turns so the model can reuse conversation context and provider KV cache. An optional second scout runs with project roots mounted read-only.
 
@@ -25,7 +25,7 @@ It keeps one writer session alive across related turns so the model can reuse co
 - `bubblewrap` (`bwrap`) for read-only scouts;
 - a configured DSH provider and model.
 
-The defaults use `opencode-go` and `glm-5.3-flash`. OpenCode Go also needs stable request affinity in the SDK profile:
+The CLI compatibility defaults use `opencode-go` and `glm-5.3-flash`. Before a paid dispatch, the orchestrator must disclose and explicitly select a user-approved provider/model. Defaults and historical successful runs are not approval; failed routes must not be replaced without agreement. This instruction contract is not a runtime billing limit. OpenCode Go also needs stable request affinity in the SDK profile:
 
 ```bash
 dsh plugin --profile sdk add @gausszhou/dsh-opencode-session-id
@@ -33,33 +33,59 @@ dsh plugin --profile sdk add @gausszhou/dsh-opencode-session-id
 
 ## Install
 
-Clone the repository and copy the skill into Codex:
+Clone the repository and install the skill package into the host that should use it:
 
 ```bash
 git clone https://github.com/jooxee/dsh-scout.git
 cd dsh-scout
-./scripts/install.sh
+./scripts/install.sh                              # Codex preset (default)
+./scripts/install.sh --host claude-code           # Claude Code
+./scripts/install.sh --host opencode              # OpenCode (respects XDG_CONFIG_HOME)
+./scripts/install.sh --host pi                    # Pi Agent Skills
+./scripts/install.sh --host omp                   # Oh My Pi
+./scripts/install.sh --host cursor                # Cursor
+./scripts/install.sh --destination /path/to/dsh-scout   # arbitrary custom root
 ```
 
-The default destination is `$CODEX_HOME/skills/dsh-scout`, falling back to `~/.codex/skills/dsh-scout`. Use `./scripts/install.sh --force` to replace an existing installation.
+Without `--host` or `--destination` the installer uses the Codex preset under `${CODEX_HOME:-$HOME/.codex}/skills/dsh-scout`. `--host` and `--destination` are mutually exclusive. Every install path requires the final directory basename to be `dsh-scout` so portable discovery stays consistent. Use `--force` to overwrite an existing installation at the same destination; without it, an existing installation aborts with exit status 17. The installer never edits host settings or global host instructions; it only copies the skill package, runtime scripts, and the bundled reference documents under it. Run `./scripts/install.sh --help` for the full option list.
+
+The set of supported host presets is:
+
+| Host preset | Skill directory |
+|---|---|
+| `codex` | `${CODEX_HOME:-$HOME/.codex}/skills/dsh-scout` |
+| `claude-code` | `$HOME/.claude/skills/dsh-scout` |
+| `opencode` | `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills/dsh-scout` |
+| `pi` | `$HOME/.pi/agent/skills/dsh-scout` |
+| `omp` | `$HOME/.omp/agent/skills/dsh-scout` |
+| `cursor` | `$HOME/.cursor/skills/dsh-scout` |
+
+For hosts that need a non-default destination, use `--destination PATH`. See [`docs/integrations.md`](docs/integrations.md) for the compatibility matrix, CLI fallback, and the verified limits.
 
 Add a short instruction to your global or project `AGENTS.md` when you want agents to use the skill automatically:
 
 ```markdown
-For substantial repository work that benefits from an external DeepSeek pass, or whenever the user requests DSH, GLM, or a scout, read `$CODEX_HOME/skills/dsh-scout/SKILL.md`. Use one full-access writer, optionally accompanied by one read-only scout; never run multiple writers.
+For repository work benefiting from a DSH scout, read the installed dsh-scout SKILL.md. Disclose the exact provider/model before dispatch and use only a user-approved route. Use one writer and at most one OS-isolated reader; supervise completion and independently verify the handoff.
 ```
+
+Set `DSH_SCOUT_HOME` to the absolute directory containing the loaded `SKILL.md`, or use the absolute launcher path directly. This is a shell convenience variable, not automatically set by installation. The launcher resolves its dependencies from its own location; `--cwd` remains the exact target repository directory.
 
 ## Run
 
-Create the first self-contained delegation packet outside the target repository, then run:
+Create the first self-contained delegation packet outside the target repository, then run the host-specific launcher with the same arguments:
 
 ```bash
-"${CODEX_HOME:-$HOME/.codex}/skills/dsh-scout/scripts/run-dsh-agent.sh" \
+DSH_SCOUT_HOME=/absolute/installed/skill/dsh-scout
+export DSH_SCOUT_PROVIDER=approved-provider
+export DSH_SCOUT_MODEL=approved-model
+"${DSH_SCOUT_HOME}/scripts/run-dsh-agent.sh" \
   --mode write \
   --cwd /absolute/path/to/project \
   --session-key project:issue-123:writer \
   --prompt-file /absolute/path/to/prompt.txt
 ```
+
+Replace the example provider/model with the approved route. Reuse that same environment for follow-up and UI commands. Hosts must preserve the same `HOME`, `CODEX_HOME` and `XDG_RUNTIME_DIR` to share state and writer/reader locks; installation location does not change them. The historical `.codex` state directory is a compatibility location, not a dependency on Codex.
 
 Reuse the same session key for follow-up turns under the same Issue, OpenSpec change, or pull request. Use a new key when the objective or authority changes. Add `--rotate` to create a handoff and continue in a fresh session immediately.
 
@@ -72,7 +98,7 @@ origin. Before or during the turn, fetch the authenticated launch URL with
 `--show-ui-url` using the same mode, cwd, provider and model:
 
 ```bash
-"${CODEX_HOME:-$HOME/.codex}/skills/dsh-scout/scripts/run-dsh-agent.sh" \
+"${DSH_SCOUT_HOME}/scripts/run-dsh-agent.sh" \
   --mode write --cwd /absolute/path/to/project --show-ui-url
 ```
 
@@ -134,7 +160,7 @@ Each terminal event is appended only after its corresponding state (idle/error, 
 Subscribe with the standalone watcher:
 
 ```bash
-"${CODEX_HOME:-$HOME/.codex}/skills/dsh-scout/scripts/watch_dsh_events.py" \
+"${DSH_SCOUT_HOME}/scripts/watch_dsh_events.py" \
   --mode write \
   --session-key repo:issue-123:writer \
   --after-sequence 0 \
