@@ -1255,7 +1255,6 @@ class ControllerWebIntegrationTests(unittest.TestCase):
                         "action": "prompt",
                         "session_key": "dsh-scout:web-integration:writer",
                         "prompt": "Reply with exactly PONG",
-                        "timeout": 30,
                     }
                 )
             self.assertTrue(response.get("ok"), response)
@@ -1275,6 +1274,37 @@ class ControllerWebIntegrationTests(unittest.TestCase):
             for conn, _ in fake._follows:
                 conn.close()
 
+    def test_web_turn_without_deadline_completes_in_same_session(self) -> None:
+        fake = FakeLoopbackDsh()
+        backend = self._boot_daemon(fake)
+        try:
+            with (
+                mock.patch.object(
+                    controller,
+                    "wait_session_stats",
+                    return_value={"context_tokens": 10, "context_window": 1000},
+                ),
+                mock.patch.object(
+                    controller, "repository_facts", return_value={"available": False}
+                ),
+            ):
+                first = self._daemon.handle(
+                    {"action": "prompt", "session_key": "no-deadline", "prompt": "PONG"}
+                )
+                second = self._daemon.handle(
+                    {"action": "prompt", "session_key": "no-deadline", "prompt": "PONG"}
+                )
+            self.assertTrue(first["ok"] and second["ok"])
+            self.assertEqual(first["session_id"], second["session_id"])
+            self.assertEqual(second["turns"], 2)
+            self.assertEqual(second["event"]["kind"], "turn_completed")
+        finally:
+            backend.terminate()
+            fake._stop.set()
+            fake.server.close()
+            for conn, _ in fake._follows:
+                conn.close()
+
     def test_followup_reuses_history_and_rotation_replaces_live_session(self) -> None:
         fake = FakeLoopbackDsh()
         fake._answer = (
@@ -1286,7 +1316,6 @@ class ControllerWebIntegrationTests(unittest.TestCase):
             "action": "prompt",
             "session_key": "rotation",
             "prompt": "PONG",
-            "timeout": 5,
         }
         try:
             with (
@@ -1331,7 +1360,6 @@ class ControllerWebIntegrationTests(unittest.TestCase):
             "action": "prompt",
             "session_key": "long-history",
             "prompt": "PONG",
-            "timeout": 5,
         }
         try:
             with (
@@ -1373,7 +1401,6 @@ class ControllerWebIntegrationTests(unittest.TestCase):
                         "action": "prompt",
                         "session_key": "oversized-latest",
                         "prompt": "PONG",
-                        "timeout": 5,
                     }
                 )
             self.assertLess(len(str(failure.exception)), 120)
@@ -1405,7 +1432,6 @@ class ControllerWebIntegrationTests(unittest.TestCase):
                             "action": "prompt",
                             "session_key": "dsh-scout:cancel:writer",
                             "prompt": "prompt",
-                            "timeout": 5,
                         }
                     )
         finally:

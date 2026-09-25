@@ -21,7 +21,6 @@ DETAIL_LIMIT = 200
 WS_FRAME_MAX_BYTES = 1 << 20  # 1 MiB safety cap on incoming WS frame payload
 WS_HANDSHAKE_TIMEOUT = 10.0
 DEFAULT_CONFIRM_WINDOW = 8.0  # seconds to wait for turn/end after cancel
-DEFAULT_PROMPT_TIMEOUT = 3600.0  # mirror SDK default
 
 
 def _yaml_bridge(text: str, operation: str) -> str:

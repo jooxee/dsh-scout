@@ -228,7 +228,6 @@ class ControllerAdmissionTests(unittest.TestCase):
                             "action": "prompt",
                             "session_key": "test",
                             "prompt": "hello",
-                            "timeout": 1,
                         }
                     )
             events = [

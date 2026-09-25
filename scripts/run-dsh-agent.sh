@@ -3,11 +3,14 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: run-dsh-agent.sh --mode write|read --cwd DIR --session-key KEY --prompt-file FILE [--rotate] [--timeout-seconds N] [--show-ui-url] [--backend web|sdk]
+Usage: run-dsh-agent.sh --mode write|read --cwd DIR --session-key KEY --prompt-file FILE [--rotate] [--show-ui-url] [--backend web|sdk]
 
 Modes:
   write  Full project access; reuses one persistent DSH writer process.
   read   Project roots are mounted read-only; reuses one persistent DSH reader process.
+
+Turns have no execution-time limit. Keep the launcher attached until a terminal
+event; closing it cancels the active turn.
 
 Backend (DSH_SCOUT_BACKEND, default web):
   web   Scout-managed ordinary DSH web runtime; UI events stream live to the

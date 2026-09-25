@@ -19,7 +19,7 @@ from .ws import WsConn
 class Follow:
     """One bounded reader; the caller remains responsive during partial frames."""
 
-    def __init__(self, client, session_id: str, deadline: float) -> None:
+    def __init__(self, client, session_id: str, deadline: float | None) -> None:
         parsed = urllib.parse.urlsplit(client.origin)
         self.conn = WsConn(
             parsed.hostname,
@@ -53,7 +53,7 @@ class Follow:
         self.reader = threading.Thread(target=self._read, args=(deadline,), daemon=True)
         self.reader.start()
 
-    def _read(self, deadline: float) -> None:
+    def _read(self, deadline: float | None) -> None:
         try:
             while not self.closed.is_set():
                 text = self.conn.read_message(deadline=deadline)
@@ -72,15 +72,16 @@ class Follow:
                 continue
 
     def next(
-        self, deadline: float, cancelled: Callable[[], bool] | None = None
+        self, deadline: float | None, cancelled: Callable[[], bool] | None = None
     ) -> dict:
-        while time.monotonic() < deadline:
+        while deadline is None or time.monotonic() < deadline:
             if cancelled and cancelled():
                 raise TimeoutError("requester disconnected")
             try:
-                item = self.items.get(
-                    timeout=min(0.1, max(0.001, deadline - time.monotonic()))
+                wait = 0.1 if deadline is None else min(
+                    0.1, max(0.001, deadline - time.monotonic())
                 )
+                item = self.items.get(timeout=wait)
             except queue.Empty:
                 continue
             return self._value(item)
@@ -149,14 +150,21 @@ class TurnDriver:
         session_id: str,
         request_id: str,
         content: list,
-        timeout: float = 3600,
+        timeout: float | None = None,
         cancel_check=None,
     ) -> dict:
-        deadline = time.monotonic() + timeout
-        follow = Follow(self.client, session_id, deadline + self.confirm_window + 20)
+        deadline = None if timeout is None else time.monotonic() + timeout
+        follow = Follow(
+            self.client,
+            session_id,
+            None if deadline is None else deadline + self.confirm_window + 20,
+        )
         state = TurnState()
         try:
-            self._snapshot(follow, min(deadline, time.monotonic() + 15), cancel_check)
+            snapshot_deadline = time.monotonic() + 15
+            if deadline is not None:
+                snapshot_deadline = min(deadline, snapshot_deadline)
+            self._snapshot(follow, snapshot_deadline, cancel_check)
             self.client.call(
                 "session/prompt",
                 {
@@ -180,7 +188,7 @@ class TurnDriver:
             raise ProtocolError("DSH session cwd differs from execution cwd")
 
     def _observe(
-        self, follow: Follow, state: TurnState, deadline: float, cancelled
+        self, follow: Follow, state: TurnState, deadline: float | None, cancelled
     ) -> dict:
         try:
             while True:

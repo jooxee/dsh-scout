@@ -1,8 +1,11 @@
 import importlib.util
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -15,6 +18,75 @@ SPEC.loader.exec_module(controller)
 
 
 class ControllerTests(unittest.TestCase):
+    def test_sdk_reader_waits_for_a_late_frame_without_turn_deadline(self) -> None:
+        read_fd, write_fd = os.pipe()
+        reader = os.fdopen(read_fd, "r")
+        writer = os.fdopen(write_fd, "w")
+        sdk = object.__new__(controller.DshSdk)
+        sdk.process = SimpleNamespace(stdout=reader, poll=lambda: None)
+
+        def deliver() -> None:
+            time.sleep(0.15)
+            writer.write(json.dumps({"method": "session.status"}) + "\n")
+            writer.flush()
+
+        sender = threading.Thread(target=deliver)
+        sender.start()
+        try:
+            self.assertEqual(sdk._read_frame(None)["method"], "session.status")
+        finally:
+            sender.join(timeout=1)
+            reader.close()
+            writer.close()
+
+    def test_prompt_defaults_to_no_turn_deadline(self) -> None:
+        valid, error = controller._validate_prompt(
+            {"session_key": "repo:issue-14:writer", "prompt": "Work until done"}
+        )
+        self.assertIsNone(error)
+        self.assertEqual(valid, ("repo:issue-14:writer", "Work until done", None))
+
+    def test_legacy_turn_timeout_is_rejected_before_dispatch(self) -> None:
+        valid, error = controller._validate_prompt(
+            {
+                "session_key": "repo:issue-14:writer",
+                "prompt": "Work until done",
+                "timeout": 3600,
+            }
+        )
+        self.assertIsNone(valid)
+        self.assertIn("no time limit", error["error"])
+
+    def test_public_launcher_rejects_turn_timeout_option(self) -> None:
+        parser = controller._build_argument_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                ["--mode", "write", "--cwd", "/tmp", "--timeout-seconds", "3600"]
+            )
+
+    def test_launcher_waits_without_socket_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prompt = root / "prompt.txt"
+            prompt.write_text("Keep working")
+            args = SimpleNamespace(
+                prompt_file=prompt,
+                runtime_dir=root / "runtime",
+                state_file=root / "state.json",
+                socket=root / "controller.sock",
+                session_key="repo:issue-14:writer",
+                rotate=False,
+                new_session=False,
+            )
+            with (
+                mock.patch.object(controller, "ensure_daemon"),
+                mock.patch.object(controller, "exchange", return_value={"ok": True}) as exchange,
+                mock.patch.object(controller, "_emit_prompt_response_log"),
+            ):
+                self.assertEqual(controller._client_dispatch_prompt(args), 0)
+            self.assertIsNone(exchange.call_args.args[2])
+            self.assertNotIn("timeout", exchange.call_args.args[1])
+
     def test_session_ids_are_unique_and_namespaced(self) -> None:
         first = controller.session_id()
         second = controller.session_id()
@@ -100,12 +172,12 @@ class ControllerTests(unittest.TestCase):
                         "action": "prompt",
                         "session_key": "repo:issue-2:writer",
                         "prompt": "Do one bounded task.",
-                        "timeout": 30,
                     }
                 )
 
             observed = daemon.sdk.observed
             self.assertEqual(observed["status"], "running")
+            self.assertIsNone(daemon.sdk.timeout)
             self.assertEqual(observed["active_turn"], 1)
             self.assertEqual(observed["session_id"], daemon.sdk.identifier)
             self.assertIn("prompt_started_at", observed)

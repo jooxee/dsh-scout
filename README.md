@@ -91,6 +91,8 @@ Reuse the same session key for follow-up turns under the same Issue, OpenSpec ch
 
 The optional reader uses the same command with `--mode read` and a key such as `project:issue-123:reader`.
 
+Writer and reader turns have no execution-time limit. Keep the launcher connected until completion or an action-required result; closing it requests cancellation and can lose the live session. Connection startup and cancellation confirmation have bounded failure-detection windows. A supervision watcher may use an optional timeout for its own wait; that timeout does not affect the Scout.
+
 For a short current-state check, use `scripts/scout_status.py --mode read
 --session-key project:issue-123:reader`. It reads local state and process
 identity without starting DSH or using model tokens. The default one-line JSON
@@ -162,7 +164,7 @@ Every delegated turn also emits lifecycle events to one append-only, user-privat
 
 - `turn_started` — the state was durably marked running before dispatch;
 - `turn_completed` — DSH became idle after producing a result;
-- `turn_failed` — dispatch, SDK execution, timeout, or agent execution failed (or the controller restarted while a session was running);
+- `turn_failed` — dispatch, SDK execution, transport, or agent execution failed (or the controller restarted while a session was running);
 - `action_required` — the scout ended its turn with a bounded terminal action handoff.
 
 Each terminal event is appended only after its corresponding state (idle/error, plus repository facts) has been persisted. The stream is the cursor authority so a subscriber cannot miss a fast start-to-terminal transition; the state file also records the latest event (`last_event`) as a convenience. An event append failure is never hidden: the prompt request fails and the state records a bounded supervision error.
@@ -174,13 +176,12 @@ Subscribe with the standalone watcher:
   --mode write \
   --session-key repo:issue-123:writer \
   --after-sequence 0 \
-  --timeout-seconds 3600 \
   --terminal-only
 ```
 
-`--after-sequence` is an exclusive cursor; `--terminal-only` restricts events to terminal kinds; `--state-root` overrides the controller state root for tests. The timeout is bounded to at most 86,400 seconds (one day); non-finite, non-positive, or above-maximum values are rejected before waiting. The watcher waits for the first matching event, prints exactly one JSON object to stdout, and exits 0. Timeout exits with code 42 and no stdout. A corrupt or truncated final JSONL record is ignored until the writer completes it; earlier valid events stay readable. Delivery is at-least-once: persist the greatest processed sequence and deduplicate by `event_id`. Events never contain prompt or response bodies, file contents, or secrets.
+`--after-sequence` is an exclusive cursor; `--terminal-only` restricts events to terminal kinds; `--state-root` overrides the controller state root for tests. The watcher waits indefinitely by default. An optional `--timeout-seconds` bounds only the watcher to at most 86,400 seconds (one day); non-finite, non-positive, or above-maximum values are rejected before waiting. The watcher prints the first matching event as exactly one JSON object and exits 0. Its optional timeout exits with code 42 and no stdout without cancelling the Scout. A corrupt or truncated final JSONL record is ignored until the writer completes it; earlier valid events stay readable. Delivery is at-least-once: persist the greatest processed sequence and deduplicate by `event_id`. Events never contain prompt or response bodies, file contents, or secrets.
 
-The blocking launcher remains compatible and additionally prints the emitted lifecycle event (`event=... kind=... sequence=...`) to stderr so existing callers see the terminal outcome. While the prompt runs, the controller watches the launcher's Unix socket; closing the launcher cancels the active turn and prevents an orphaned writer. Prompt timeouts use failure reason `sdk-timeout` (SDK backend) or `web-timeout` (web backend), launcher disconnects use `client-disconnected`, and other prompt failures use `prompt-failed`. When an action envelope is valid and terminal, the control block is delivered only inside the supervision event; the launcher prints the cleaned assistant text, with oversized valid values clipped to their documented bounds. Malformed or non-terminal envelopes remain ordinary stdout verbatim. Session keys are bounded to at most 200 characters and rejected, never clipped, at prompt input and in the watcher.
+The blocking launcher prints the emitted lifecycle event (`event=... kind=... sequence=...`) to stderr so callers see the terminal outcome. While the prompt runs, the controller watches the launcher's Unix socket; closing the launcher cancels the active turn and prevents an orphaned writer. Launcher disconnects use `client-disconnected`, and other prompt failures use `prompt-failed`. When an action envelope is valid and terminal, the control block is delivered only inside the supervision event; the launcher prints the cleaned assistant text, with oversized valid values clipped to their documented bounds. Malformed or non-terminal envelopes remain ordinary stdout verbatim. Session keys are bounded to at most 200 characters and rejected, never clipped, at prompt input and in the watcher.
 
 On the web backend, cancellation success requires a confirmed `turn/end` (or proven idle with no writer ever possible). When cancel is rejected, the confirmation window expires, the transport breaks, or ownership is ambiguous, the owned runtime process group is terminated BEFORE the terminal `turn_failed` event is appended and a fresh runtime/session requires an explicit `--new-session` acknowledgement — a possibly-active writer is never kept after a reported failure. Persisted sessions are reused only when both ownership and terminal state are proven.
 

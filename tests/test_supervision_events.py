@@ -65,7 +65,6 @@ def run_prompt(daemon, response_text: str | None = None, sdk=None, **request):
                 "action": "prompt",
                 "session_key": SESSION_KEY,
                 "prompt": "Do one bounded task.",
-                "timeout": 30,
                 **request,
             }
         )
@@ -329,7 +328,6 @@ class HandleEventOrderTests(unittest.TestCase):
                         "action": "prompt",
                         "session_key": SESSION_KEY,
                         "prompt": "Do one bounded task.",
-                        "timeout": 30,
                     },
                     client_socket=request_socket,
                 )
@@ -401,7 +399,7 @@ class SessionKeyBoundaryTests(unittest.TestCase):
             with mock.patch.object(controller, "repository_facts", return_value={"available": False}), mock.patch.object(
                 controller, "wait_session_stats", return_value={"context_tokens": 10, "context_window": 1000}
             ):
-                response = daemon.handle({"action": "prompt", "session_key": max_key, "prompt": "work", "timeout": 30})
+                response = daemon.handle({"action": "prompt", "session_key": max_key, "prompt": "work"})
             self.assertTrue(response["ok"])
             events = read_events(root / EVENTS_FILE)
             for event in events:
@@ -522,7 +520,7 @@ class RestartRecoveryTests(unittest.TestCase):
                 controller, "wait_session_stats", return_value={"context_tokens": 10, "context_window": 1000}
             ):
                 response = daemon.handle(
-                    {"action": "prompt", "session_key": "repo:issue-6:writer", "prompt": "work", "timeout": 30}
+                    {"action": "prompt", "session_key": "repo:issue-6:writer", "prompt": "work"}
                 )
             self.assertEqual(response["event"]["sequence"], 3)
             self.assertEqual(response["event"]["event_id"], "write:3")
@@ -595,7 +593,7 @@ class RestartRecoveryTests(unittest.TestCase):
                 controller, "wait_session_stats", return_value={"context_tokens": 10, "context_window": 1000}
             ):
                 response = daemon.handle(
-                    {"action": "prompt", "session_key": "repo:issue-7:writer", "prompt": "work", "timeout": 30}
+                    {"action": "prompt", "session_key": "repo:issue-7:writer", "prompt": "work"}
                 )
             self.assertEqual(response["event"]["sequence"], 3)
             self.assertEqual(response["event"]["event_id"], "write:3")
