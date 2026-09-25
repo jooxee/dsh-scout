@@ -98,13 +98,16 @@ def find_event(
     return None
 
 
-def wait_for_event(path: Path, deadline: float, listener: dict[str, Any]) -> dict[str, Any] | None:
-    """Poll the stream until one matching event appears or time runs out."""
-    while time.monotonic() < deadline:
+def wait_for_event(path: Path, deadline: float | None, listener: dict[str, Any]) -> dict[str, Any] | None:
+    """Poll the stream until one matching event appears or an optional wait ends."""
+    while deadline is None or time.monotonic() < deadline:
         event = find_event(read_events(path), **listener)
         if event is not None:
             return event
-        time.sleep(min(POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
+        delay = POLL_INTERVAL_SECONDS if deadline is None else min(
+            POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())
+        )
+        time.sleep(delay)
     return find_event(read_events(path), **listener)
 
 
@@ -113,7 +116,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--mode", choices=["write", "read"], required=True)
     parser.add_argument("--session-key", required=True)
     parser.add_argument("--after-sequence", type=int, default=CURSOR_DEFAULT)
-    parser.add_argument("--timeout-seconds", type=float, default=3600.0)
+    parser.add_argument("--timeout-seconds", type=float, default=None)
     parser.add_argument("--terminal-only", action="store_true")
     parser.add_argument(
         "--state-root",
@@ -124,11 +127,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.after_sequence < 0:
         parser.error("--after-sequence must be non-negative")
-    if not math.isfinite(args.timeout_seconds):
+    if args.timeout_seconds is not None and not math.isfinite(args.timeout_seconds):
         parser.error("--timeout-seconds must be a finite number")
-    if args.timeout_seconds <= 0:
+    if args.timeout_seconds is not None and args.timeout_seconds <= 0:
         parser.error("--timeout-seconds must be positive")
-    if args.timeout_seconds > TIMEOUT_MAX_SECONDS:
+    if args.timeout_seconds is not None and args.timeout_seconds > TIMEOUT_MAX_SECONDS:
         parser.error(f"--timeout-seconds must be at most {TIMEOUT_MAX_SECONDS:g}")
     if not args.session_key.strip():
         parser.error("--session-key must be a non-empty string")
@@ -142,7 +145,7 @@ def main() -> int:
     args = parse_args()
     state_root = args.state_root.resolve() if args.state_root is not None else default_state_root()
     path = event_file(state_root, args.mode)
-    deadline = time.monotonic() + args.timeout_seconds
+    deadline = None if args.timeout_seconds is None else time.monotonic() + args.timeout_seconds
     event = wait_for_event(
         path,
         deadline,

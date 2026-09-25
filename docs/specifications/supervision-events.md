@@ -62,7 +62,7 @@ state root. Events use this versioned shape:
 - `action_required`: the scout ended the turn with a bounded structured action
   request;
 - `turn_completed`: DSH became idle after producing a result;
-- `turn_failed`: dispatch, SDK execution, timeout, or agent execution failed.
+- `turn_failed`: dispatch, SDK execution, transport, or agent execution failed.
 
 Events are controller-derived except for the optional payload on
 `action_required`. An action request is explicitly untrusted, scout-declared
@@ -110,13 +110,14 @@ Provide a watcher command that accepts:
 
 - mode and session key;
 - an exclusive `after_sequence` cursor;
-- a bounded, finite timeout (at most 86,400 seconds; non-finite, zero or
-  negative values are rejected before waiting);
+- an optional finite timeout for this watcher only (at most 86,400 seconds;
+  non-finite, zero or negative values are rejected before waiting);
 - optional terminal-only filtering.
 
-It waits for the first matching event, writes exactly one JSON object to
-stdout and exits successfully. Timeout exits with a distinct documented code
-and no fabricated event. A corrupt/truncated final JSONL line is ignored until
+It waits indefinitely by default for the first matching event, writes exactly
+one JSON object to stdout and exits successfully. An optional watcher timeout
+exits with a distinct documented code and no fabricated event; it never
+cancels or changes the Scout turn. A corrupt/truncated final JSONL line is ignored until
 the writer completes it; earlier valid events remain readable.
 
 Delivery is at least once. Subscribers persist the greatest processed
@@ -131,6 +132,12 @@ task when it resolves. In Codex Desktop, the skill must register a thread
 heartbeat or use the host's asynchronous `notify` facility immediately after
 dispatch; the monitor stays quiet while the event cursor has not advanced and
 removes itself after a terminal event.
+
+The public launcher has no turn-duration option or implicit deadline. Its
+socket, the SDK prompt reader and the web follow stay attached until DSH ends
+the turn, the requester disconnects, or an actual transport/runtime failure
+occurs. Startup, handshake and cancellation-confirmation windows remain bounded
+so failed connections and ambiguous cancellation cannot hang ownership.
 
 While a prompt is active, the controller also watches the requesting launcher's
 Unix socket. End-of-file means the launcher stopped waiting, so the controller
@@ -152,7 +159,7 @@ dispatch accepted
      -> ordinary idle result
         -> persist idle + verification pending
         -> append turn_completed
-     -> error / timeout / requesting client disconnect
+     -> error / requesting client disconnect
         -> persist error
         -> terminate the DSH SDK process group
         -> append turn_failed
@@ -169,9 +176,8 @@ diff, tests and external records.
 
 - Controller restart keeps prior events and continues the sequence above the
   greatest valid record.
-- A prompt timeout emits `turn_failed` with reason `sdk-timeout` on the SDK
-  backend or `web-timeout` on the web backend; a requesting client disconnect
-  emits it with reason `client-disconnected`; any other prompt failure uses
+- A requesting client disconnect emits `turn_failed` with reason
+  `client-disconnected`; any other prompt failure uses
   reason `prompt-failed`. On the web backend cancellation success requires a
   confirmed `turn/end` (or proven idle with no writer ever possible): cancel
   rejection, confirmation timeout, broken transport, or ambiguous ownership
@@ -213,8 +219,9 @@ diff, tests and external records.
 Unit tests must cover:
 
 - ordered start/completed and start/failed events;
-- timeout and requesting-client disconnect abort the SDK, emit their specific
-  failure reasons, and require explicit `--new-session` acknowledgement before a fresh session;
+- requesting-client disconnect aborts the SDK, emits its specific failure
+  reason, and requires explicit `--new-session` acknowledgement before a fresh session;
+- no implicit or public turn deadline in SDK, web, launcher socket or watcher;
 - terminal action-envelope recognition and strict rejection of malformed,
   oversized or non-terminal lookalikes;
 - cursor filtering, terminal filtering, timeout and duplicate-safe event ids;

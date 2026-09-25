@@ -192,8 +192,8 @@ class TimeoutArgumentTests(unittest.TestCase):
             self.parse(value)
         self.assertEqual(caught.exception.code, 2)
 
-    def test_default_timeout_is_bounded_and_accepted(self) -> None:
-        self.assertEqual(self.parse().timeout_seconds, 3600.0)
+    def test_default_wait_is_unlimited_and_explicit_timeout_is_accepted(self) -> None:
+        self.assertIsNone(self.parse().timeout_seconds)
         self.assertEqual(self.parse("86400").timeout_seconds, 86400.0)
         self.assertEqual(self.parse("0.25").timeout_seconds, 0.25)
 

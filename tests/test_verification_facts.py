@@ -155,7 +155,6 @@ class TurnLifecycleTests(unittest.TestCase):
                         "action": "prompt",
                         "session_key": "repo:issue-1:writer",
                         "prompt": "Do a bounded task.",
-                        "timeout": 5,
                     }
                 )
             saved = controller.read_json(state_path)["sessions"]["repo:issue-1:writer"]
@@ -194,7 +193,6 @@ class TurnLifecycleTests(unittest.TestCase):
                         "action": "prompt",
                         "session_key": "repo:issue-1:writer",
                         "prompt": "Work here.",
-                        "timeout": 5,
                     }
                 )
             saved = controller.read_json(state_path)["sessions"]["repo:issue-1:writer"]

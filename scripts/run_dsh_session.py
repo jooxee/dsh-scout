@@ -45,7 +45,6 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 import dsh_web  # noqa: E402
 
-DEFAULT_TIMEOUT = 3600
 ACTION_OPEN = "<dsh-scout-action-required-v1>"
 ACTION_CLOSE = "</dsh-scout-action-required-v1>"
 ACTION_SUMMARY_LIMIT = 500
@@ -362,7 +361,7 @@ class DshSdk:
 
     def _read_frame(
         self,
-        deadline: float,
+        deadline: float | None,
         client_socket: socket.socket | None = None,
     ) -> dict[str, Any]:
         assert self.process.stdout is not None
@@ -372,8 +371,8 @@ class DshSdk:
             selector.register(client_socket, selectors.EVENT_READ, "client")
         try:
             while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
                     raise TimeoutError("Timed out waiting for DSH SDK")
                 ready = selector.select(remaining)
                 if not ready:
@@ -408,7 +407,7 @@ class DshSdk:
         self,
         identifier: str,
         text: str,
-        timeout: int,
+        timeout: int | None,
         client_socket: socket.socket | None = None,
     ) -> str:
         request_id = self._send(
@@ -418,7 +417,7 @@ class DshSdk:
                 "contentBlocks": [{"type": "text", "text": text}],
             },
         )
-        deadline = time.monotonic() + timeout
+        deadline = None if timeout is None else time.monotonic() + timeout
         accepted = False
         saw_running = False
         latest_text = ""
@@ -553,7 +552,7 @@ def _git(args: list[str], cwd: Path, timeout: int = 10) -> subprocess.CompletedP
     )
 
 
-def _validate_prompt(request: dict[str, Any]) -> tuple[tuple[str, str, int] | None, dict[str, Any] | None]:
+def _validate_prompt(request: dict[str, Any]) -> tuple[tuple[str, str, int | None] | None, dict[str, Any] | None]:
     """Validate a ``prompt`` action request.
 
     On success returns ``((key, prompt, timeout), None)``. On failure returns
@@ -561,19 +560,15 @@ def _validate_prompt(request: dict[str, Any]) -> tuple[tuple[str, str, int] | No
     """
     key = request.get("session_key")
     prompt = request.get("prompt")
-    try:
-        timeout = int(request.get("timeout", DEFAULT_TIMEOUT))
-    except (TypeError, ValueError):
-        return None, {"ok": False, "error": "timeout must be a positive integer"}
-    if timeout <= 0:
-        return None, {"ok": False, "error": "timeout must be positive"}
+    if "timeout" in request:
+        return None, {"ok": False, "error": "turn timeout is unsupported; Scout turns have no time limit"}
     if not isinstance(key, str) or not key.strip():
         return None, {"ok": False, "error": "session_key must be a non-empty string"}
     if len(key) > SESSION_KEY_LIMIT:
         return None, {"ok": False, "error": f"session_key must be at most {SESSION_KEY_LIMIT} characters"}
     if not isinstance(prompt, str) or not prompt.strip():
         return None, {"ok": False, "error": "prompt must be a non-empty string"}
-    return (key, prompt, timeout), None
+    return (key, prompt, None), None
 
 
 def _clipped(value: str, limit: int = GIT_FACTS_ERROR_LIMIT) -> str:
@@ -917,7 +912,7 @@ class SessionDaemon:
         self,
         identifier: str,
         text: str,
-        timeout: int,
+        timeout: int | None,
         client_socket: socket.socket | None,
     ) -> str:
         sdk = self._ensure_sdk()
@@ -930,7 +925,7 @@ class SessionDaemon:
         key: str,
         session_record: dict[str, Any],
         full_prompt: str,
-        timeout: int,
+        timeout: int | None,
         client_socket: socket.socket | None,
     ) -> dict[str, Any]:
         """Dispatch one turn through the scout-owned web runtime.
@@ -951,7 +946,7 @@ class SessionDaemon:
             result = driver.run_prompt(
                 session_id=identifier, request_id=uuid.uuid4().hex,
                 content=[{"type": "text", "text": full_prompt}],
-                timeout=float(timeout), cancel_check=cancelled,
+                timeout=None if timeout is None else float(timeout), cancel_check=cancelled,
             )
         except Exception:
             if cancelled():
@@ -969,7 +964,7 @@ class SessionDaemon:
         self,
         key: str,
         current: dict[str, Any],
-        timeout: int,
+        timeout: int | None,
         client_socket: socket.socket | None,
     ) -> tuple[dict[str, Any], str]:
         if self.backend == "sdk":
@@ -1121,7 +1116,7 @@ class SessionDaemon:
         *,
         key: str,
         prompt: str,
-        timeout: int,
+        timeout: int | None,
         request: dict[str, Any],
         client_socket: socket.socket | None,
         current: dict[str, Any],
@@ -1177,7 +1172,7 @@ class SessionDaemon:
         self,
         key: str,
         current: dict[str, Any],
-        timeout: int,
+        timeout: int | None,
         client_socket: socket.socket | None,
         request: dict[str, Any],
         started_at: int,
@@ -1212,7 +1207,7 @@ class SessionDaemon:
         key: str,
         current: dict[str, Any],
         full_prompt: str,
-        timeout: int,
+        timeout: int | None,
         client_socket: socket.socket | None,
     ) -> dict[str, Any]:
         if self.backend == "sdk":
@@ -1452,7 +1447,7 @@ class SessionDaemon:
                 pass
 
 
-def exchange(socket_path: Path, request: dict[str, Any], timeout: int) -> dict[str, Any]:
+def exchange(socket_path: Path, request: dict[str, Any], timeout: int | None) -> dict[str, Any]:
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.settimeout(timeout)
     try:
@@ -1688,11 +1683,10 @@ def _client_dispatch_prompt(args: argparse.Namespace) -> int:
             "action": "prompt",
             "session_key": args.session_key,
             "prompt": prompt,
-            "timeout": args.timeout_seconds,
             "rotate": args.rotate,
             "new_session": args.new_session,
         },
-        args.timeout_seconds + 60,
+        None,
     )
     if not response.get("ok"):
         print(
@@ -1776,7 +1770,6 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cwd", type=Path, required=True)
     parser.add_argument("--prompt-file", type=Path)
     parser.add_argument("--session-key")
-    parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT)
     parser.add_argument("--rotate", action="store_true")
     parser.add_argument("--socket", type=Path)
     parser.add_argument("--state-file", type=Path)
@@ -1806,8 +1799,6 @@ def _apply_default_paths(args: argparse.Namespace) -> None:
 
 
 def _validate_client_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    if args.timeout_seconds <= 0:
-        parser.error("--timeout-seconds must be positive")
     if args.new_session and args.rotate:
         parser.error("--new-session cannot be combined with --rotate")
     if args.serve:

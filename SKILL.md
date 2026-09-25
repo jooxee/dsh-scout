@@ -55,7 +55,7 @@ The launcher records exact DSH context pressure from the session store:
 
 Override the thresholds with `DSH_SCOUT_SOFT_CONTEXT_TOKENS` and `DSH_SCOUT_HARD_CONTEXT_TOKENS`. The soft value must remain below the hard value.
 
-Do not infer context size from cumulative billed usage. Cache reads reduce repeated computation but do not free context-window space. If the controller restarted, a prompt timed out, or its requesting host disconnected, the launcher refuses continuation before dispatch. Report the loss and use `--new-session` only after an explicit decision to accept fresh context, with a new self-contained packet and re-checked repository state. Do not automatically acknowledge loss. `--new-session` rejects healthy sessions; `--rotate` remains a live handoff. Failed prompts are never retried automatically.
+Do not infer context size from cumulative billed usage. Cache reads reduce repeated computation but do not free context-window space. If the controller restarted, a transport/runtime failure occurred, or its requesting host disconnected, the launcher refuses continuation before dispatch. Report the loss and use `--new-session` only after an explicit decision to accept fresh context, with a new self-contained packet and re-checked repository state. Do not automatically acknowledge loss. `--new-session` rejects healthy sessions; `--rotate` remains a live handoff. Failed prompts are never retried automatically.
 
 The web controller requests only the last message in the opening follow snapshot; the stream cursor still supplies every new event. This keeps long-session history out of the controller's WebSocket frame while DSH retains the full session and cache. A genuinely oversized newest frame fails with a bounded transport reason. Do not respond to that failure by silently starting a fresh Scout.
 
@@ -75,7 +75,7 @@ Save the packet in a temporary prompt file outside the repository, then run:
 
 Use the same approved provider/model environment on every follow-up and UI command.
 
-For the optional second scout, use `--mode read` and a key ending in `:reader`. The reader can run beside the writer; otherwise wait for one request to finish before starting another. Use `--timeout-seconds N` only when the default one-hour bound is unsuitable. Use `--rotate` only at a coherent boundary because it creates a handoff turn.
+For the optional second scout, use `--mode read` and a key ending in `:reader`. The reader can run beside the writer; otherwise wait for one request to finish before starting another. Scout turns have no execution-time limit; keep the launcher attached until a terminal event. Use `--rotate` only at a coherent boundary because it creates a handoff turn.
 
 The default backend is a scout-owned ordinary DSH web runtime. For routine supervision use the compact status and terminal event watcher below. Retrieve its authenticated URL with the same mode/cwd/provider/model and `--show-ui-url` (omit session-key and prompt-file) when a failure, action request, or verification needs the full live record. It works during a running turn. Keep the same tab across turns. The normal prompt response prints only the token-free origin. Do not copy the authenticated URL into Issues, logs, or handoffs. A separate user-started DSH, such as port 3080, does not receive live events from this process.
 
@@ -110,11 +110,10 @@ Use the watcher to block until the next relevant event:
   --mode write \
   --session-key repo:issue-123:writer \
   --after-sequence 0 \
-  --timeout-seconds 3600 \
   --terminal-only
 ```
 
-It waits for the first event matching mode, session key, and an exclusive sequence cursor (optionally terminal-only), then prints exactly one JSON object to stdout and exits 0. Timeout exits with code 42 and no stdout. A corrupt or truncated final JSONL record is ignored until the writer completes it. See `docs/specifications/supervision-events.md` for the full contract.
+It waits without a deadline for the first event matching mode, session key, and an exclusive sequence cursor (optionally terminal-only), then prints exactly one JSON object to stdout and exits 0. An optional `--timeout-seconds N` limits only the watcher and exits with code 42 and no stdout; it never cancels the Scout. A corrupt or truncated final JSONL record is ignored until the writer completes it. See `docs/specifications/supervision-events.md` for the full contract.
 
 ### Terminal action_required handoff
 
