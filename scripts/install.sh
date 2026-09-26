@@ -149,6 +149,7 @@ install_payload() {
   install -m 0644 "$repo_root/agents/openai.yaml" "$dest/agents/openai.yaml"
   install -m 0755 "$repo_root/scripts/run-dsh-agent.sh" "$dest/scripts/run-dsh-agent.sh"
   install -m 0755 "$repo_root/scripts/run_dsh_session.py" "$dest/scripts/run_dsh_session.py"
+  install -m 0644 "$repo_root/scripts/node_runtime.py" "$dest/scripts/node_runtime.py"
   for module in "$repo_root/scripts/dsh_web/"*.py; do
     [[ -e "$module" ]] || continue
     install -m 0755 "$module" "$dest/scripts/dsh_web/$(basename "$module")"

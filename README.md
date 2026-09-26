@@ -22,8 +22,11 @@ It keeps one writer session alive across related turns so the model can reuse co
 
 - Linux with Python 3.10 or newer;
 - DeepSeek Harness with the `sdk` profile;
+- Node 22 or newer exposing `node:util.parseEnv`;
 - `bubblewrap` (`bwrap`) for read-only scouts;
 - a configured DSH provider and model.
+
+The launcher honors an absolute `DSH_SCOUT_NODE=/path/to/bin/node` override, otherwise uses compatible PATH Node, then checks installed NVM versions (newest numeric version first) under `${NVM_DIR:-$HOME/.nvm}`. An invalid explicit override fails without fallback. It prepends the selected directory only to its inherited process environment; it never installs Node or sources shell profiles. Missing prerequisites produce a safe error before controller startup. Existing daemons retain their original environment. Runtime selection does not retry a failed session: its existing explicit `--new-session` recovery rule still applies.
 
 The CLI compatibility defaults use `opencode-go` and `glm-5.3-flash`. Before a paid dispatch, the orchestrator must disclose and explicitly select a user-approved provider/model. Defaults and historical successful runs are not approval; failed routes must not be replaced without agreement. This instruction contract is not a runtime billing limit. OpenCode Go also needs stable request affinity in the SDK profile:
 
