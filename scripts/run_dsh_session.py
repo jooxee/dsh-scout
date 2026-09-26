@@ -44,6 +44,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 import dsh_web  # noqa: E402
+from node_runtime import NodeRuntimeError, configure_node  # noqa: E402
 
 ACTION_OPEN = "<dsh-scout-action-required-v1>"
 ACTION_CLOSE = "</dsh-scout-action-required-v1>"
@@ -1606,6 +1607,7 @@ def ensure_daemon(args: argparse.Namespace) -> None:
         model=MODEL,
     ):
         return
+    configure_node(os.environ)
     if args.socket.exists():
         stop_daemon(args.socket)
         if args.socket.exists():
@@ -1825,7 +1827,11 @@ def main() -> int:
         with daemon_ownership(args.state_file):
             return SessionDaemon(args.mode, args.cwd, args.socket, args.state_file,
                                  backend=args.backend).serve()
-    return client_main(args)
+    try:
+        return client_main(args)
+    except NodeRuntimeError as error:
+        print(str(error), file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
